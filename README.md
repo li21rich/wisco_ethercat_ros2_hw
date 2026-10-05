@@ -2,8 +2,6 @@
 
 This repository contains the physical hardware configuration, PDO mapping, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
 
-## 🏗️ System Architecture
-
 The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
 
 ```text
@@ -22,7 +20,7 @@ wisco_ws/src/
     │   └── wbc_controller.hpp     # Class headers, Eigen matrix declarations
     └── src/
         └── wbc_controller.cpp     # The 1kHz QP solver & Pinocchio rigid body dynamics
-
+```
  Quick Start Workflow
 1. Build the Workspace
 
