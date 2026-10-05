@@ -1,17 +1,18 @@
-# WiscoHumanoids Hardware Interface
+## WiscoHumanoids Hardware Interface
 
 This repository contains the physical hardware configuration, PDO mapping, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
 
 RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
+
 ```text
 wisco_ws/src/
 ├── ethercat_driver_ros2/          # (add separately)
 │
-├── wisco_hw_interface/            # <----- (THIS REPO: Hardware configuration)
-│   ├── config/rmd_x4_10.yaml      #     Hexadecimal PDO maps & gear ratios
-│   ├── config/controllers.yaml    #     Dictates which controllers to load
+├── wisco_ethercat_ros2_hw/        # <----- (THIS REPO: Hardware configuration)
+│   ├── config/rmd_x4_10.yaml      #      Hexadecimal PDO maps & gear ratios
+│   ├── config/controllers.yaml    #      Dictates which controllers to load
 │   ├── launch/test_bench.launch.py 
-│   ├── urdf/test_bench.urdf.xacro #     Physical robot description & slave IDs
+│   ├── urdf/test_bench.urdf.xacro #      Physical robot description & slave IDs
 │   └── README.md                  # (you are here)
 │
 └── wisco_controllers/             # (C++ controls stack to be added separately)
@@ -46,49 +47,43 @@ ROS 2 (full) on Jetson Thor
 └── Sends high-level targets (50–100Hz) over DDS ──┐
                                                      │
                                                      ▼
-                              ROS 2 DDS Network (non-RT link)
+                               ROS 2 DDS Network (non-RT link)
                                                      │
                                                      ▼
                      RK3588: wbc_controller's ROS 2 command surface
 ```
- Quick Start Workflow
-1. Build the Workspace
 
-Run this from the workspace root (~/Code/wisco_ws) whenever you add new files, modify CMakeLists.txt, or compile C++ code.
-The --symlink-install flag ensures Python and YAML edits update automatically without requiring a rebuild.
-Bash
+### Quick Start Workflow
 
+**1. Build the Workspace**
+Run this from the workspace root (`~/Code/wisco_ws`) whenever you add new files, modify `CMakeLists.txt`, or compile C++ code. The `--symlink-install` flag ensures Python and YAML edits update automatically without requiring a rebuild.
+```bash
 colcon build --symlink-install
+```
 
-2. Source the Environment
-
+**2. Source the Environment**
 Run this in every new terminal before executing ROS 2 commands.
-Bash
-
+```bash
 source /opt/ros/jazzy/setup.bash
 source ~/Code/wisco_ws/install/setup.bash
+```
 
-3. Launch the Stack
-
-Requires sudo to allow the EtherCAT driver to access the raw /dev/EtherCAT0 network device.
-Bash
-
+**3. Launch the Stack**
+Requires `sudo` to allow the EtherCAT driver to access the raw `/dev/EtherCAT0` network device.
+```bash
 # 1. Start the kernel module (make sure the slave is connected)
 sudo systemctl start ethercat
 
 # 2. Launch ros2_control and the hardware interface
-sudo -E bash -c 'source /opt/ros/jazzy/setup.bash && source ~/Code/wisco_ws/install/setup.bash && ros2 launch wisco_hw_interface test_bench.launch.py'
+sudo -E bash -c 'source /opt/ros/jazzy/setup.bash && source ~/Code/wisco_ws/install/setup.bash && ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py'
+```
 
-Useful Debugging Command Examples
+### Useful Debugging Command Examples
 
 Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
 
-    List active ROS2 topics: ros2 topic list
-
-    Stream live motor telemetry (pos/vel/effort): ros2 topic echo /joint_states
-
-    Verify hardware loaded: ros2 control list_hardware_interfaces
-
-    Verify controllers loaded: ros2 control list_controllers
-
-    Command torque manually: ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"
+* **List active ROS2 topics:** `ros2 topic list`
+* **Stream live motor telemetry (pos/vel/effort):** `ros2 topic echo /joint_states`
+* **Verify hardware loaded:** `ros2 control list_hardware_interfaces`
+* **Verify controllers loaded:** `ros2 control list_controllers`
+* **Command torque manually:** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
