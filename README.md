@@ -1,6 +1,6 @@
 ## WiscoHumanoids Hardware Interface
 
-This repository contains the physical hardware configuration, PDO mapping, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
+This repository contains the physical hardware configuration, PDO mapping, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents are solely to run a single servo as a test demo. Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
 
 RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
 
@@ -55,20 +55,20 @@ ROS 2 (full) on Jetson Thor
 
 ### Quick Start Workflow
 
-**1. Build the Workspace**
-Run this from the workspace root (`~/Code/wisco_ws`) whenever you add new files, modify `CMakeLists.txt`, or compile C++ code. The `--symlink-install` flag ensures Python and YAML edits update automatically without requiring a rebuild.
+**1. Build**
+Run this from the workspace root (`[DIRECTORY]/wisco_ws`) whenever you make changes
 ```bash
 colcon build --symlink-install
 ```
 
 **2. Source the Environment**
-Run this in every new terminal before executing ROS 2 commands.
+Run this in any new terminal before executing ROS 2 commands.
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/Code/wisco_ws/install/setup.bash
+source [DIRECTORY]/wisco_ws/install/setup.bash
 ```
 
-**3. Launch the Stack**
+**3. Launch**
 Requires `sudo` to allow the EtherCAT driver to access the raw `/dev/EtherCAT0` network device.
 ```bash
 # 1. Start the kernel module (make sure the slave is connected)
@@ -77,6 +77,10 @@ sudo systemctl start ethercat
 # 2. Launch ros2_control and the hardware interface
 sudo -E bash -c 'source /opt/ros/jazzy/setup.bash && source ~/Code/wisco_ws/install/setup.bash && ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py'
 ```
+
+Note that the test bench by default runs an example python script that sends torque commands to the motor to spin every couple seconds.
+
+rviz2 is recommended to visualize the servo as it runs.
 
 ### Useful Debugging Command Examples
 
@@ -87,3 +91,5 @@ Open a second (sourced) terminal while the launch file is running to inspect the
 * **Verify hardware loaded:** `ros2 control list_hardware_interfaces`
 * **Verify controllers loaded:** `ros2 control list_controllers`
 * **Command torque manually:** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
+
+
