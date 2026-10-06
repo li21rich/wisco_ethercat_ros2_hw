@@ -2,13 +2,13 @@
 
 Demo: https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view?usp=sharing
 
-This repository contains the physical hardware configuration, PDO mapping, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents are solely to run a single servo as a test demo. Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
+This repository contains the physical hardware configuration, PDO mapping, demo script, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents serve as a test demo that proves you can run a single servo with ROS 2 Jazzy and ethercat_driver_ros2 on a Linux laptop (replace with RK3588 in final implementation). Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
 
 RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
 
 ```text
 wisco_ws/src/
-├── ethercat_driver_ros2/          # (add separately)
+├── ethercat_driver_ros2/          # (add separately, you need to install this for it to work github.com/ICube-Robotics/ethercat_driver_ros2)
 │
 ├── wisco_ethercat_ros2_hw/        # <----- (THIS REPO: Hardware configuration)
 │   ├── config/rmd_x4_10.yaml      #      Hexadecimal PDO maps & gear ratios
@@ -17,7 +17,7 @@ wisco_ws/src/
 │   ├── urdf/test_bench.urdf.xacro #      Physical robot description & slave IDs
 │   └── README.md                  # (you are here)
 │
-└── wisco_controllers/             # (C++ controls stack to be added separately)
+└── wisco_controllers/             # (C++ controls stack to be added separately later along with the rest of the humanoid)
     ├── include/wisco_controllers/
     │   └── wbc_controller.hpp     # Class headers, Eigen matrix declarations
     └── src/
