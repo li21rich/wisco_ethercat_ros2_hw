@@ -1,55 +1,40 @@
 <?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="wisco_test_bench">
-  <link name="base_link">
-    <visual>
-<origin xyz="0.01 0 0" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.05" length="0.11"/></geometry>
-      <material name="black"><color rgba="0.1 0.1 0.1 1"/></material>
-    </visual>
-  </link>
-  
-  <link name="test_mass">
-    <visual>
-      <!-- Main cylinder body -->
-      <origin xyz="0.01 0 0.01" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.05" length="0.11"/></geometry>
-      <material name="red"><color rgba="1 0.2 0.2 1"/></material>
-    </visual>
-    <visual>
-      <!-- Asymmetric pointer box sticking out radially to show rotation -->
-      <origin xyz="0.05 0 0.07" rpy="0 0 0"/>
-      <geometry><box size="0.04 0.02 0.02"/></geometry>
-      <material name="red"><color rgba="1 1 1 1"/></material>
-    </visual>
-  </link>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
 
-  <joint name="test_motor_joint" type="continuous">
-    <parent link="base_link"/>
-    <child link="test_mass"/>
-    <axis xyz="0 0 1"/>
-    <calibration rising = "0.0"/>
-  </joint>
+  <!-- TODO(Multi-Actuator): Define links and joints for multi-actuator kinematic chain (e.g., shoulder, elbow, wrist) -->
 
-  <ros2_control name="EthercatTestBench" type="system">
+  <ros2_control name="EtherCATSystem" type="system">
     <hardware>
       <plugin>ethercat_driver/EthercatDriver</plugin>
       <param name="master_id">0</param>
-      <param name="control_frequency">100</param>
+      <!-- TODO(Multi-Actuator): Update EtherCAT loop rate and interface configurations -->
     </hardware>
 
-<joint name="test_motor_joint">
-  <state_interface name="position"/>
-  <state_interface name="velocity"/>
-  <state_interface name="effort"/>
-  <command_interface name="effort"/>
-  <command_interface name="reset_fault"/>
+    <!-- TODO(Multi-Actuator): Add joint hardware definitions and EtherCAT slave indices (0, 1, 2) for each daisy-chained actuator -->
+    <joint name="joint_1">
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <command_interface name="effort"/>
+      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 1 (Slave Index 0) -->
+    </joint>
 
-  <ec_module name="rmd_test_motor">
-    <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
-    <param name="alias">0</param>
-    <param name="position">0</param>
-    <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
-  </ec_module>
-</joint>
- </ros2_control>
+    <joint name="joint_2">
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <command_interface name="effort"/>
+      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 2 (Slave Index 1) -->
+    </joint>
+
+    <joint name="joint_3">
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <command_interface name="effort"/>
+      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 3 (Slave Index 2) -->
+    </joint>
+
+  </ros2_control>
+
 </robot>

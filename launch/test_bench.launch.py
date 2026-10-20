@@ -6,11 +6,16 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
+    # TODO(Multi-Actuator): Update launch dependencies and configuration paths to support multi-drive setup
     pkg_share = get_package_share_directory('wisco_ethercat_ros2_hw')
     urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
     robot_desc = ParameterValue(Command(['xacro ', urdf_file]), value_type=str)
+
+    # TODO(Multi-Actuator): Ensure URDF xacro loading handles multiple joint hardware interface definitions
+    # TODO(Multi-Actuator): Correctly sequence and parameterize controller manager, joint_state_broadcaster, and effort_controller nodes for multiple 
     
     return LaunchDescription([
+        # TODO(Multi-Actuator): Add launch arguments for selecting number of active daisy-chained actuators (2 vs 3)
         Node(
             package='controller_manager',
             executable='ros2_control_node',
