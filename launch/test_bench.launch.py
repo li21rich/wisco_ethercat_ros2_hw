@@ -10,10 +10,18 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('wisco_ethercat_ros2_hw')
     urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
     robot_desc = ParameterValue(Command(['xacro ', urdf_file]), value_type=str)
+    multi_drive_params = {
+        'num_drives': 3,
+        'drive_names': ['drive_1', 'drive_2', 'drive_3']
+    }
 
     # TODO(Multi-Actuator): Ensure URDF xacro loading handles multiple joint hardware interface definitions
+    for param, value in multi_drive_params.items():
+        robot_desc += f'\n<param name="{param}" value="{value}"/>'
+
     # TODO(Multi-Actuator): Correctly sequence and parameterize controller manager, joint_state_broadcaster, and effort_controller nodes for multiple 
-    
+    for concurrent actuator control, ensuring proper topic remapping and parameter passing for each drive
+
     return LaunchDescription([
         # TODO(Multi-Actuator): Add launch arguments for selecting number of active daisy-chained actuators (2 vs 3)
         Node(
