@@ -1,1481 +1,0 @@
-## WiscoHumanoids Hardware Interface
-
-Demo: https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view?usp=sharing
-
-This repository contains the physical hardware configuration, PDO mapping, demo script, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents serve as a test demo that proves you can run a single servo with ROS 2 Jazzy and ethercat_driver_ros2 on a Linux laptop (replace with RK3588 in final implementation). Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
-
-RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
-
-```text
-wisco_ws/src/
-â”œâ”€â”€ ethercat_driver_ros2/          # (add separately, you need to install this for it to work github.com/ICube-Robotics/ethercat_driver_ros2)
-â”‚
-â”œâ”€â”€ wisco_ethercat_ros2_hw/        # <----- (THIS REPO: Hardware configuration)
-â”‚   â”œâ”€â”€ config/rmd_x4_10.yaml      #      Hexadecimal PDO maps & gear ratios
-â”‚   â”œâ”€â”€ config/controllers.yaml    #      Dictates which controllers to load
-â”‚   â”œâ”€â”€ launch/test_bench.launch.py 
-â”‚   â”œâ”€â”€ urdf/test_bench.urdf.xacro #      Physical robot description & slave IDs
-â”‚   â””â”€â”€ README.md                  # (you are here)
-â”‚
-â””â”€â”€ wisco_controllers/             # (C++ controls stack to be added separately later along with the rest of the humanoid)
-    â”œâ”€â”€ include/wisco_controllers/
-    â”‚   â””â”€â”€ wbc_controller.hpp     # Class headers, Eigen matrix declarations
-    â””â”€â”€ src/
-        â””â”€â”€ wbc_controller.cpp     # The 1kHz QP solver, Pinocchio rigid body dynamics, etc.
-
-ros2_control (controller_manager process, same process as hw_interface)
-â”œâ”€â”€ ethercat_driver_ros2 (SystemInterface) â”€â”€ 14x RMD-X4-10 CiA 402
-â”œâ”€â”€ wbc_controller plugin
-â””â”€â”€ State/Command Interfaces (hardware interface exposed by ethercat_driver_ros2, consumed/written by wbc_controller)
-
-ROS 2 (minimal) on RK3588
-â””â”€â”€ Command surface exposed by wbc_controller (action/topic for
-    Cartesian/task targets) â€” receives targets from Jetson Thor
-```
-
-Jetson Thor (not included here; for context):
-```text
-jetson_ws/src/
-â””â”€â”€ wisco_policy/
-    â”œâ”€â”€ wisco_policy/
-    â”‚   â””â”€â”€ policy_node.py              # RL locomotion policy / MPC
-    â””â”€â”€ launch/
-        â””â”€â”€ policy.launch.py
-
-ROS 2 (full) on Jetson Thor
-â”œâ”€â”€ MoveIt 2 / AI pipeline
-â”œâ”€â”€ RL locomotion policy / MPC
-â”œâ”€â”€ Vision / SLAM
-â””â”€â”€ Sends high-level targets (50â€“100Hz) over DDS â”€â”€â”
-                                                     â”‚
-                                                     â–¼
-                               ROS 2 DDS Network (non-RT link)
-                                                     â”‚
-                                                     â–¼
-                     RK3588: wbc_controller's ROS 2 command surface
-```
-
-### Quick Start Workflow
-
-**1. Build**
-Run this from the workspace root (`[DIRECTORY]/wisco_ws`) whenever you make changes
-```bash
-colcon build --symlink-install
-```
-
-**2. Source the Environment**
-Run this in any new terminal before executing ROS 2 commands.
-```bash
-source /opt/ros/jazzy/setup.bash
-source [DIRECTORY]/wisco_ws/install/setup.bash
-```
-
-**3. Launch**
-Requires `sudo` to allow the EtherCAT driver to access the raw `/dev/EtherCAT0` network device.
-```bash
-# 1. Start the kernel module (make sure the slave is connected)
-sudo systemctl start ethercat
-
-# 2. Launch ros2_control and the hardware interface
-sudo -E bash -c 'source /opt/ros/jazzy/setup.bash && source ~/Code/wisco_ws/install/setup.bash && ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py'
-```
-
-Note that the test bench by default runs an example python script that sends torque commands to the motor to spin every couple seconds.
-
-rviz2 is recommended to visualize the servo as it runs.
-
-### Useful Debugging Command Examples
-
-Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
-
-* **List active ROS2 topics:** `ros2 topic list`
-* **Stream live motor telemetry (pos/vel/effort):** `ros2 topic echo /joint_states`
-* **Verify hardware loaded:** `ros2 control list_hardware_interfaces`
-* **Verify controllers loaded:** `ros2 control list_controllers`
-* **Command torque manually:** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
-
-
-#!/usr/bin/env python3
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray
-from sensor_msgs.msg import JointState
-import time
-
-class StictionBreakerNode(Node):
-    def __init__(self):
-        super().__init__('example_torque_command_ros_node')
-        self.publisher_ = self.create_publisher(Float64MultiArray, '/effort_controller/commands', 10)
-        self.subscription = self.create_subscription(JointState, '/joint_states', self.joint_state_callback, 10)
-        
-        self.current_position = 0.0
-        self.current_velocity = 0.0
-        self.target_torque = 0.0
-        
-        self.state = "PULSE" # PULSE or COAST
-        self.state_start_time = time.time()
-        
-        # Tuned for 10:1 reducer stiction: needs higher output torque briefly
-        self.pulse_torque = 1.35    # NÂ·m output torque to break stiction cleanly
-        self.pulse_duration = 0.25 # 150ms sharp kick
-        self.coast_duration = 1.3  # 2 seconds coasting/paused
-        
-        self.timer = self.create_timer(0.01, self.control_loop) # 100 Hz
-        self.get_logger().info("Stiction Breaker Torque Node Initialized.")
-
-    def joint_state_callback(self, msg):
-        if len(msg.position) > 0:
-            self.current_position = msg.position[0]
-        if len(msg.velocity) > 0:
-            self.current_velocity = msg.velocity[0]
-
-    def control_loop(self):
-        now = time.time()
-        elapsed = now - self.state_start_time
-
-        if self.state == "PULSE":
-            self.target_torque = self.pulse_torque
-            if int(now * 20) % 2 == 0:
-                self.get_logger().info(f"[PULSE] Torque: {self.target_torque} NÂ·m | Pos: {self.current_position:.2f}")
-
-            if elapsed >= self.pulse_duration:
-                self.state = "COAST"
-                self.state_start_time = now
-
-        elif self.state == "COAST":
-            self.target_torque = 0.0
-            if int(now * 10) % 2 == 0:
-                self.get_logger().info(f"[COAST] Torque: 0.0 | Pos: {self.current_position:.2f} | Vel: {self.current_velocity:.4f}")
-
-            if elapsed >= self.coast_duration:
-                self.state = "PULSE"
-                self.state_start_time = now
-
-        msg = Float64MultiArray()
-        msg.data = [self.target_torque]
-        self.publisher_.publish(msg)
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = StictionBreakerNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        pub = node.create_publisher(Float64MultiArray, '/effort_controller/commands', 10)
-        pub.publish(Float64MultiArray(data=[0.0]))
-        node.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
-#!/usr/bin/env python3
-
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray
-from sensor_msgs.msg import JointState
-
-class MultiActuatorTorqueController(Node):
-    def __init__(self):
-        super().__init__('multi_actuator_torque_controller')
-
-        # TODO(Multi-Actuator): Make target joints and command topics configurable via ROS2 parameters
-        self.declare_parameter('joint_names', ['joint_1', 'joint_2', 'joint_3'])
-        self.joint_names = self.get_parameter('joint_names').get_parameter_value().string_array_value
-
-        # TODO(Multi-Actuator): Update publisher to send dynamic size effort array matching number of daisy-chained actuators
-        self.cmd_pub = self.create_publisher(
-            Float64MultiArray,
-            '/effort_controller/commands',
-            10
-        )
-
-        # TODO(Multi-Actuator): Subscribe to /joint_states and parse position/velocity/effort telemetry across all joints
-        self.joint_state_sub = self.create_subscription(
-            JointState,
-            '/joint_states',
-            self.joint_state_callback,
-            10
-        )
-
-        # TODO(Multi-Actuator): Adapt control loop timer and safety monitoring routines for concurrent multi-joint execution
-        self.timer = self.create_timer(0.01, self.control_loop_callback) # 100Hz loop
-
-        self.get_logger().info(f'Initialized Multi-Actuator Controller for joints: {self.joint_names}')
-
-    def joint_state_callback(self, msg: JointState):
-        # TODO(Multi-Actuator): Extract multi-element arrays for position, velocity, and effort based on active joint ordering
-        pass
-
-    def control_loop_callback(self):
-        # TODO(Multi-Actuator): Calculate torque vector commands (e.g. stiction breaking, torque trajectory) for 2 to 3 drives
-        cmd_msg = Float64MultiArray()
-        # Example dummy array for 3 joints
-        cmd_msg.data = [0.0] * len(self.joint_names)
-        
-        # TODO(Multi-Actuator): Implement safety checks (e.g., effort limiters, velocity caps) across all actuators before publishing
-        self.cmd_pub.publish(cmd_msg)
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = MultiActuatorTorqueController()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()<?xml version="1.0"?>
-<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
-<package format="3">
-  <name>wisco_ethercat_ros2_hw</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="lilrichardh@gmail.com">richard</maintainer>
-  <license>TODO: License declaration</license>
-
-  <buildtool_depend>ament_cmake</buildtool_depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
-  <export>
-    <build_type>ament_cmake</build_type>
-  </export>
-</package>
-cmake_minimum_required(VERSION 3.8)
-project(wisco_ethercat_ros2_hw)
-
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
-# find dependencies
-find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
-
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
-install(
-  DIRECTORY config urdf launch
-  DESTINATION share/${PROJECT_NAME}
-)
-install(
-  PROGRAMS scripts/example_torque_command_ros_node.py
-  DESTINATION lib/${PROJECT_NAME}
-RENAME example_torque_command_ros_node
-)
-ament_package()
-import os
-from launch import LaunchDescription
-from launch.substitutions import Command
-from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
-from ament_index_python.packages import get_package_share_directory
-
-def generate_launch_description():
-    # TODO(Multi-Actuator): Update launch dependencies and configuration paths to support multi-drive setup
-    pkg_share = get_package_share_directory('wisco_ethercat_ros2_hw')
-    urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
-    robot_desc = ParameterValue(Command(['xacro ', urdf_file]), value_type=str)
-
-    # TODO(Multi-Actuator): Ensure URDF xacro loading handles multiple joint hardware interface definitions
-    # TODO(Multi-Actuator): Correctly sequence and parameterize controller manager, joint_state_broadcaster, and effort_controller nodes for multiple 
-    
-    return LaunchDescription([
-        # TODO(Multi-Actuator): Add launch arguments for selecting number of active daisy-chained actuators (2 vs 3)
-        Node(
-            package='controller_manager',
-            executable='ros2_control_node',
-            parameters=[{'robot_description': robot_desc},
-                       os.path.join(pkg_share, 'config', 'controllers.yaml')],
-            output='both',
-        ),
-        Node(
-            package='robot_state_publisher',
-            executable='robot_state_publisher',
-            parameters=[{'robot_description': robot_desc}],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['effort_controller', '--controller-manager', '/controller_manager'],
-        ),
-        Node(
-            package='wisco_ethercat_ros2_hw',
-            executable='example_torque_command_ros_node',
-            name='torque_ramper',
-            output='screen',
-        ),
-    ])
-Unnamed repository; edit this file 'description' to name the repository.
-# pack-refs with: peeled fully-peeled sorted 
-3478bc25aa0a326294667d29819c9f2d3dbc8f83 refs/remotes/origin/main
-# git ls-files --others --exclude-from=.git/info/exclude
-# Lines that start with '#' are comments.
-# For a project mostly in C, the following would be a good set of
-# exclude patterns (uncomment them if you want to use them):
-# *.[oa]
-# *~
-DIRC      jÖÇS(åœ/jÖÇS(åœ/  ²¨Œ  ¤  è  è  jIú sè\Z±^Kbä%<#Á^ CMakeLists.txt    jÖÇS(åœ/jÖÇS(åœ/  ²©Ô  ¤  è  è  Ó}«°¿öÌ†^Ç[Ëı|ô\ 	README.md jÖÇS(ìsjÖÇS(ìs  ²©Ö  ¤  è  è  ¥÷a[å;[k2ÙF›8iHö¸]“ú config/controllers.yaml   jÖÇS(ìÎ„jÖÇS(ìÎ„  ²©×  ¤  è  è  v+öUòÓ,çÎÌnE´ ñ]= config/rmd_x4_10.yaml     jÖÇS(ìÎ„jÖÇS(ìÎ„  ²©Ù  ¤  è  è  9·çüE{X_|?C«P98çT<ƒ‚ launch/test_bench.launch.py       jÖÇS(ìÎ„jÖÇS(ìÎ„  ²©Ú  ¤  è  è  húNÑ¾­²Ëx×?a9*¬CÌ` package.xml       j×›@ Dj×›@ D  ²©Ü  í  è  è  
-©l-†zök'A»¥4nµBÌİg *scripts/example_torque_command_ros_node.py        jÖÇS(ğâjÖÇS(ğâ  ²©Ş  ¤  è  è  $-P>‡@MÇÃ¨ª9ˆ”–q urdf/test_bench.urdf.xacro        TREE   ” 8 4
-îicL6B°£5L¢yë€ïÄW¼urdf 1 0
-Tîz—kuPHl²„sCD%Şconfig 2 0
-âVI)ûˆ¥Ø 2Ì5÷kÑJæ‰LØlaunch 1 0
-P9ü(ğó¹~Öà¼°àSúscripts 1 0
-õàæij´9NëOg:å O©,0÷é@®ôV
-Ö•7â!’öO˜ÃÄ3478bc25aa0a326294667d29819c9f2d3dbc8f83
-3478bc25aa0a326294667d29819c9f2d3dbc8f83
-3478bc25aa0a326294667d29819c9f2d3dbc8f83
-ref: refs/remotes/origin/main
-xKÊÉOR020·`ÈÌ-È/*QÈ/æJ+ÊÏUÈI,ÍKÎP€Šú€y.©ÅÉE™%™ùyÈŠôŠK“ŠK2KJAÅ0-Îù¹¹‰y)È
-ã‹ò‹õ“Q”ùå§¤b¨)H,JÌM-I-ŠOAX	79 &–˜S
-Õœ˜›šWŸ™—’Z_PY’‘Ÿ§W˜œ˜
-×–Z‹/ÎH,JOÉ,JM.É/ªäâJIMSHOÍK-J,I‡øÙnM+.e…ßÒœ’L]Çä’ÒÄ’ü"M+…Ğ‚”Ä’TX ¥¤¤æ¥¤æ%g¦+$æ¥($çç¥e¦—%‚¼®PX’Q¬P’¯P\Z ó\°q)E™e©
-Å©%¥`»
-²Ó!îT°UÀãvõòÌâäüøÔ’ŒÔ¢äÄP Åg”«k‚M)-JI‹OËÌIU°UÈ/ÖÙ­—•Ÿ™§7^GA¤H]GA½$µ¸$>)5/9C$¤W‘˜\”5¨(?)¿&
-¶
-¨Q khu°u~°½±š:
-e ˆŠ/©,Hµ-.)Òä»WXºæ—¥*„¹¸)@ŒËÉOLÉÌKWÈHÌKÉI-V ‡WANªÈ#%
-‰E)å‰E©
-™y%©Ei‰É©
-)©i™y™ Ğ.Æk—s~(	äT*§–¦æ%§‚ãş2«RA‘WR”Ÿ““Z¤›˜—˜Z¤±8¾¸”Z’ŠòS’‹K@ ØNMKË/*‰OÎÏƒéËËOI-VHË/B8ì,0Q”ZRZ”§€‘Å4¢ÁÒø’cJ
-,Í%¥—‚ò ÄšâÔœÔäP˜å•æ&¥)ä§)€2^YªBJbfq¥nrFbf^j
-Hœ†‹4ŒÊŠŒ!©d)(gjÀ æ[u„×â¡A¢®ƒ¢2µ"5¹´$1)'ÕV½(¿Øñ @SìbÛèjuD2ƒ–4êV
-±ZTk@‚bœi’÷Ôu\]¬W™˜›£®‹j\~iIAi‰­zR~I’#5ªğ„	Ä‘$QPš”“Yœ‘Z„d
-È¨ÁÊOøÕ“4H!ÎÅ$ÅbqAby†‡à©Î6Zœ1ó(äuuvéÂSŒ‚º>BÚ¹—æÀQ~#RzÒI­HÌ-ÈI/É/*,MO†Ô´ ‚[şÊKÌMµU‡ª-JÌ-ÀˆEXº/N.JMÍCJ³Ğt«É /P¢³xKÊÉOR075bHÎÏ+)ÊÏÉI-ŠÏMÌKLO-²âRP(Ê//H,JÌM-I-*	)(”¤$–¤Æ%–¤Z)(((+„ø»økø–æ”dê:&—”&–äiZ)''æ¤*”(”äƒxT)”g¤æ)¥&æè–dæ¦*d§å¥æ(h¹ºú„Ä…h*d+$çç¥e¦—¥¦pq)(à¶À5¯¸´(U!+?3¯$¾¸ä¬¤¢üÄ”äÄâ’Ô"…‚Ò¤œÌâŒÔb°œBbQQb¥BZ~‘BbNÈ’¼Ôä’Ô…”¢Ì²Ôb°M8Œ‚ø\A¡¤² Õ
-—}ú^ wƒœá„p~8Ã|ª½ÄŠÌb…Ô´´ü¢¡q
-ÀÄääÔ‚…²Ôä’ü"İ¤ÄâÔ…äüÜÜÄ¼ˆÓ!ºâ1‰êhébˆ{İ‹òK\Á6:Ã†riXÓ®ØwIMËÌƒFB^bn*(^‹ŠR‹òóR2óÒA‚zšd²3óRsK2“’33ó4RõÒõtŠ3òKsRR‹tRs’òËuÊ‹2‹K4M™
-
-ºĞ¸1Ë!øFh|c )DlxKÊÉOR0456e°±¯ÈÍQ(K-*ÎÌÏ³U2Ô3P²·ã²)ÊOÊ/Q¨ÈÍÉ+¶ªHL.Ê·UÊ())°Ò×///×+Ê/ÖË/J×/ÏÌÎÔK+)ä%æ¦Ú*å–æ”dÆ'&—”&–äÅ—¤—Ä'¥æ%g(Ùqq)(Ø(êê*„ø»økø‚ê:BjZ)¸¤¦eæ¥*ädæe+$æ¥(dågæ•+¤å)€MÕ…™ª™—š›X’™¬œ‘˜™§ ‘ª—®§£Pœ‘_š“’Z¤£š“”_®£P^”Y\¢© «±»(¿Ø(>9?¯¤(?ê\×’ŒÔ"gÇàÊâ’Ô\%…’Ê‚T[¥bÏKAAAÁ&#±(¥<±(ÂUP°)È)MÏÌ³KéMN,‰O)Ê,K-Ò›•œXâæÚèC•éJ,JÌ…Z››X\’ZŸ™¢dg`£_ ’›;„BRKRÀö8;†(ääç(„@Á•™W’Z”–˜œªœŸ—–™^Z”X’™ŸWö>Ø#úŸ€…'2S á¯ Ó£ŠŸLˆ‘ ûàÎ(ÎI,KUÈÌKÉLN-VĞ0ĞQ0ÔQ0ÒG\jbr†BJbfq¥.8ªRSà±Š°»À0;ŞP	Å%‰%©ñÏA’YA~1Ø)Jú–¥æä'g–TT˜š––_T‚¤,9?771/Ãj…¸#Ì7±@!ÀÅ_Á©%©EÔKô
-†
-ÁàÀóÌKI­P0€$Up˜èƒœnlÀ”2!d„B†$„ñÈ!cÔ2ÂB6úÈ…ŸH )¿Ä ·‡ìNxKÊÉOR02¶4ePVÔ/-.ÒOÊÌÓOÍ+S(¨,ÉÈÏ3æâÊÌ-È/*Q(JÎ)¨äJ+ÊÏ…0õòòSR ’~ù)©¹â’”øÜâôb½Üât˜¬[N~b‰™‰oiNI¦cQQ"Ô˜âÔ¼âü"Õ^ù™y%Á%‰%©\\É9‰ÅÅ
-É%¥‰%ùE!ùE…¥©Îùy%Eù99©E »5­¸RRÓâã3ó2Kâã5ŠSsÒ â ¹âÒ‚Ô"M=¸¼z.È=ñ‰PsãKÀÇ'ÃMV×ä›
-Ò­¬âïâ¯v‰®#T‹¦•‚obvªBIbQzj‰BÈáÅ
-‰y)
-Éù¹¹ º$¿ 3¹X!9?/-3½´(1)'U¡,3Q!È?ØH¡ ±(17µ$µ¨nÈÍz)©É9‰E©ñpyu°Ññy‰¹©Åê:
-ÑP¾¡º”i„`«Çj¢ˆ¤[ÁVlGzj	.ó5õP$ãËsJS54õŠKŠ2óÒãA$<¡)‰%©
-¥I9™Å©E
-%ù
-Å©y)
-)•y‰¹™É
-Å™U©
-©ii 6Y!7±$9#3/]!¯47)µH!?M!%1³¸R79#13/5Eah¡–œ›_Pšó`rQjbI*Hb³<H@Ñ‰‘"uP¤Õõ!NBJúĞ(-VGUjh ×IDr	.M*N.ÊLJ„>$^ŠAI’l
-‹ŠS
-ò‹3K2óóôËRsò“3K*¡®Q(IÍIÍM-)ªTHL.Ê/.VHÌÉ¦:¸#À±‹dp|1F˜CQ ²5XYÕ“ê(NE“sr’“³QÍ - SJ@ù”ËròóJ2sS‹À¹«81-µ¤R!7?/³$”(ŠòKK2óR‹Òò‹@º’K‹ŠRóJÀY\
-©©É¥ ?£†ÄXh¶€¦°˜†¡$»@…xCâaşÓTPV040ğ¨»‘ÀÊC9ùééà2'3/-_#Mİ3/³$31'³*5R¦ÁKDyöØÅÅV
-Õ`³À<Hî¯…J ¢"N?pG‹=…Üât+Dt"•ƒ¸J2×Š’¢ÄdXSZ^‰8OB‚–,u`éR¬¢”Xœš¢ŸÊŸ™e©t©_”’
-Š!x˜$C‚
-ä¬á
-ö.vNÌI.Í•/¢[¡,5¹ÿàÂ·XA#U/]O¡¸$3í
-IE©‰Ù™yé:
-Põ%E‰Y`-•šàP7åJc…”¢Ì²TDé*X@•™­F©¡(h•\+srRRJss+!6Õê¥$–$*Ø*DèÄ*h)ä¤æ}®‰Vpa0€¸âÏdy.(ÑC³GrFjr64t`elNfn&¨ÆAD¢BrbA±&r‰/`’RÓò‹àÅwf^:Üàt	
-™‚Ò$=hñ®âç§krqâ6713O#±(½ØÖ/?/ŸàV„¨††Hä!7'l!ùVÁbÔõ¥%E•úT”CL,.ÈÌÓ Q‘Z‘œZP¢àZ™”ŸX”â™W’ZTTZP‚ĞN‡ ıi™y‰99H‚LÑKI-.)Ê¯ŒqbjYFiIJ~y†&W&¨ÅŠ«øx[[õøx¿ããÕ!V8š pÅxKÊÉOR0`  	°ğPACK      )˜Ixœ}”I¯£H„ïüŠº[ıØ7©gÔ`VcÌbÀ6·Šå™Å†b±}¿éÍeF“·ŒˆOÊK$	²Àr9+pLFA–å¹2¢L‹b‰2‰BeÎñb–8¢(!ZÌd†A.©,Ù’—9$ ¹ óL¤3™†LIpÆõ0‚°Ék8àØ€ï’À³¬DS»¶aèñËø1Ohœ>úaDöõQ5¸³|èşô×	ŒÀÓ"¾Q<E_j×`ŒF`6Øš3ğıoìÇÿbÕ£šš
-|ûkTİ´OÀ7}p¶Í“Å¡şK' ÖÉÈUEQ÷Š¨Áá¹Ù]¼÷4ÄyæãºUE¥@19}uïrîl<ï­•Ğ¥Çcš GÙ]ÃK””ÎrÒ¯~§âØ©2.®1&ÑO„Q¥7Õm–ğºT	™hV8´RJiªS Úé›©}R‰(wı©ÉÎLÂç*ŒØxÑöG¾-^ô2µÇA°R÷ğ·Õ®­gCÅY¥ 4æ÷âQñZÈw†ÜHÍ;êB^ë(Î–ƒuã±b´¥ºÕ£ÆŸE];°s¥9¢ŠõøG$Ñr›mk¸ãE?“<¢Ş1n
-ÑpÊh;aHÛt:‘4+”§u¸xúƒ¶á•Eeà
-G€ái ={ŒÎc),^öD{|nF¬ìzø¼!„n½ØgÔ]!$éºK"%|ù®šq±`,L«Ä=>|Ş¸º1T±÷ÛißÓVPlÒ½]q§>¹ŒW¨ìõ-KX2¡*;“L€Ğ1b‹®U?P\|NGÇ²œkLQìİK½>í=†mûy™Ñz‡)Y0»áìû|!Š
-“öoĞ&ußp‘|®ğ7¹¡O%lwwªæ^JZK˜?«tñü"/‚nÀÈÉ*Äh>÷¬<İÃRJ÷3äçÆãòv¶·¹³8¹Ş}ªLßşçÉjŞ6É²¦gA¿º…ÌX6Õ·]M#¢AÜ‚Ó0W•1rõ–¢f»ˆ·¡a5ıñº+‡K4É{7ä…~Ş©”ÖÍi=WÄ;¬|˜ }ä_c!•³Né…øã \Xâw'ô“öß ô¾†}@¨+š«ƒõ«e @İ ¦|l_Ÿ /¾v›v"ˆøQ@Œ
-€ë <€¦ÏÛ¹@ÿÂòMùú•ÆhÂ¿y|úø	Sİs\’Fxœ}“É’›HE÷|Eî.%3D¸f*„
-£v™bƒõõ®v÷Òá·¼'î]½3„ ñXÈ +°<CËi†h&Çf0›	4‘S¦2A™Lh$İÒ\ä–•i™Ë%Z„‚˜"L!KXI&Í(´Ìe?‚ JK4fÀ®ÀwIàYV¢á®©zü?—‰ŒÓ[×dh¶·¢šË¿¥}ûĞ¢L3|ƒ<„ÔWÚVóLF`VóaÁàûÿµŸ­C1Uøöï©†i¹À3=Z¦«Dq`üÎ)@uzOUEQ5EñUÿøxYµ¢|qYø¸lEq‘á+ºìÜy‡»W<ë×µãğ3®e…ğC³M2P‹İaOO±sœ'ñ\Ó$t£Øéo«´Ó¼úrÊ²ÇlÊ,ùíaà”mKŞ7ÔÉwÍg€ºÌzÄqWƒzJ¯lm«™˜˜ög{Ã{áCí±ë®xÒg¬â=Nƒ]ÔETzK7ß,£§¹;gS²Şb*w¯ìQÃ¥Iè9óR­;oóı~=–Tˆ\ìıÄ÷%İ+ºUH?ú¼'æıõ|D.²¡§l1y]®YH»"~GÊ6%­/ºA*jøHh+zô¡íŸ›ğæó}B]Zı‹½X¥Ç¶—æ×Š˜.nxÒ…ÕUF0í²~|†HIÜªUwÃúÕ"‘Ô7º}·j{‡Lú!øÜŒ³…;>=f0³¨íi‘Lÿ~UüZpÔW\ê¹àf¬Î^¶Ş£Óó‚§dBUÖ¯¡F»éÔMçZo†ÓÒyıÔ¾.ÎûvO) ³k=¹ä$MŸ»åtFÅ”L¦è_¶‡Şëº¸‡şşâÆVhÛr2ğ\à öTXØ§ÀŞäKû´àÈ#“ëX†»u‰ŠF£8_ÉeÃFùä¼\1Äì²«ÈÑö9¥¶c©Ÿ_ÆRáY.¶q±»4õ§YNú£fûg”®s­×(º+Ÿ…cÔ†°Å˜Ñ$‘[.–•õõÕ~^;£Ùk¡¶4§Eø'Bıç„áê6‚R²d¤íASu5˜{Šî¿ù#ù—ğM@iJ¦éí%&cã•xœ¥ÌA‚0@Ñ}O1;Wši¡Ğ&Æx•¡F ¦õø²ğn_~~-Ì`]Å8é¼Æ€ØÓàf¤^Ä:1^¤ÕÑ¨'^+‰µ>21m§¦Á‡¨	=Ù&(Úë””&*ñ´ÁœÖı×9Í?›îãBi¾„¼Ü@÷^›®µ­†3ZDuè’jå?êË#­#l\^"/Y}ÁÎMO–Ixœ}TIÏ£F½ó+úæÌb&Ñ ¶1cv/·64‹Yİ4Øø×3I”K”º”ôªŞ;TÕ+‚œ¨ 1“²$ILxqü]Y%PWÉZäø,»ËäDª‡µ°ÒJäy‰]ÉÂ‚C>eNQ8VSA(%ë/¬@Á‘~™§À.ÁwYZ¨2ÇÒu¹âğRø1_m‡Q_Ï_yIŠñş•tÍŸ€[+ÜŠ—xQßØ5ËRÚ”„ Œ’ìÇ;øş7íÇÿÒò>Ê|ûÚÖ0à.LÃQÃÈßşÆ)@×°K4UÕtUõ4Ïz¾µÊĞ}ƒŞzÅ¨¨UU5¤ÊSµúlW‘Ê@¶†›Ôõ3ÓJ­¦€{iíÊı áÑGŞÅ‰?q:ÆèK¼oIA›7iIÄfñºè7SÆp<d~à|XCñrÖüş6g±Ù$Ç~îHzb,?°^Z¯riÒ8ˆqü:u·¨6¢mÒZaÓ9*Ætc
-Ä…›4Âl«d/Z\M‡^,Y–¡ı² tlì6×lOßöÆÛÏö-}Şax1«dòŠNÀb±uhíµ7Š«~+}	Ì"±Í+ö=ñ×şÒvTÙ‰ñ·åSĞòP´òêÜu×˜¡ÀÙ›4#šÙÔ_†Œµ[x¨âü8z£_Gı|&.äĞc{7Ÿ¬ˆ)f»¦~ÿ£V×pv¡À³ˆQkDÎI>öìhí_¡E›G¦•ÆEl1D|²É¢ 2Ã›+İ/ÙŞ<I‘I‡µÇ)3ÔşÉîó5\FìõUDw«­²ÙÉÓlsÁÎwÃ§;ÅP7ï)¾2¨’BfÙÅ€ŞåPø÷âpšÔBÇíE¶ï¢ÏdfÄÔ	9¶ôµí)(‡9|å«È“Y
-/Œ£¯]•»S@`–­Ú² |”U3ã^ãÚÃÙ‹­=Mîç`{äeÂµz‰•IÎÍ˜óØBèèlÂO£–§j¤ÀgW1N0o7«M™²îÚlÕ÷k`M¦ÉÓ«4*r5orŸ>-Ç0(÷oegTéì2‡×Í.‰|:h"+wLkòr©ÜS‘¦şòÄÖÙü·#(Må€€¿U7Ç-È/'5Ä%™lS0<&dÄˆ¢¢>…¥ÿt’`”Õ(!Kî»¡$ÿíË?hs4üV)›wú¥Ş@BÊ6ÿú	ƒÁtÌ“Hxœ}TÉ²ªHÜóµ7Ş•yˆxİñ ½Š
-Š¨»ªd,ŠA¾¾éİ»>Ë<'3r‘y(A¨š,±cI„’ˆùPC¨BÌ²XÓx>æDAÆqÄJL	ª(ÀXÁBIÃiœ"Ëó|È,s‹$>‚ìiZàeQ
-Iø©Ê’ ¨»*2#ËâWß!Ò}U5AMñùJ2šöáWT—NÑ8^9‘?X…e™-3JvFw}~şCûõ¿´¤Iº,?şÃ²÷'p±/àº·OúÍ÷¬ß80vÛÈĞuÃÔu×p¿ÛÉH:Ó39è*}/ùi¡/ËãÛÕíkkúŸÊ~'°°Ï¯Ã÷š¾‡€0ÀOJ©œˆóÙoêq§§Wâ˜}Mó¤æ²iK?ElKû½ê³·\v‘®)Ÿ×Z"÷É‡g@™ªA\©‘‹|2‹§í„âÊØvÉ”¯»ı…œòyš{İMšËÓ¿çX«sTïçñŸ˜›ûn:DIÚ±L÷ÇCfqçw3W÷%kßÌqŸ…h¥^BYuÌ÷=,Îloúß)§î´ê=v;¸û}‘@Ràncn¿_šÎ“1Ds£íjåRJÒÖMOÓ\¶E¸[ºvN0EÌ±ÕHù«º×Gö¹jCsİ†S‘¼ù®Æíñ6v÷òeù|öêl|^][ÖÆ\c€`³Â,¼.5Ù/¬¡é:¹]äZÇ;¬n²»ss¾ÈÊ;HîY®”o^^(‡ÈD*ôÍãRz½²iµëc–¼×“|UEÜ-:àÆ‹óı=Ï§á¸:œ‡ó9>7Ó1B8S1b@¯Ğ¨®ßíº6zİG…¬×}sã®Å-´Àk³å™[9J¼Ø)Ñçı0¢ğd…ÖŠ`vñÀ“ì…¢QŸÏaûÉ×'é¾«aĞå2q›rü¤ÕÓ8ò¹Ø>ü”¶´–n©óóÛÒÃxQ¨yhhšhìğµ6Q6usü¼ª2‡º6KQÃÎ½¼Şœ‹S›lŞmOªøº†>¶"¨øyá o:Z¡ã´’Ì†ø£Ç%,¿³o6ÿİÆªRXEx–¾q,0.-Q–7@@GIÑ  «ÄˆÂ¬èÆobHQü/…Ö +Rh!B’ÑÏïs\“RšUÉ×_…rJ“Kxœ}“K¯£8…÷ü
-ïzõ6á©gÔ$$<yîŒqÀá•€	¹ùõC_µF£Ñh¼±Uu¾£:R™·”YS‰ŒiB Œ¤HÕŒfD%’<WEEC9½
-wÜÒšÉš$iôš&âø€²¤ae†aª¨ÎQ¢şÂ	EîyŞ´`ÇHÛlø¡)òˆBqR2Û±ñ³ïhÛ}ÔMKïåçGÆxŞ'¤©ş£D’Œ4|UQÆjÅ8§-°_÷	øñûù¿XvÏ:–ï¿ÎbeÙ¬ D¶åéñ~·úª@ Cg’…®/–º.BçñZÄár·„8Tû^Şç¥®ë¾»
-uÇĞñŠ°ìx†¥¾15‡¶‘EÈ?‹W0ÜôêO§,b~‘Ï^b¼µ9aı\e‘4à½: c±!†!\°!I@ĞÚu ©?ê!Éwr|mªlƒÙ,¬yN?˜I=aÛIS¨'×ÖnŸŞûmèí^>{8ô}n÷•‡ÂJº_Ùc¨æÖ>ï‡¶éÜL]o;YßÎgW«*²X{5^ŠëÈ1…£•‡“«Şò“èíö–=q]^lÚåíUœf6)ŸŞÜ¨KëÂPz¹æê­„ñ¡êë6Æ›L)Êäé?ö‰àÜm£X$/Ó¼xá1F‡ù[‘VŠU ÓI¼™´¿FÎ66+z€aæF4‰ò'×ßï&Ú	ÛÖ®µFCäg
-ôgñ¼œ£,İg™î”]±à‰<<£µ(‹ötLÁÎ–îH–«/ïÈ(2ß„=<^¬òqõ=‡thPºÑÆæİãÊ©‹¶·âË<hË¸ÏUn	à$ÙWË$MaÛeèŠ?·hÜo±¢ê*±Ò…»Y–lSMûC”F˜ÅY’?nbÌºÑ“™¯®ò|›×‡I~|-íàQ9Ë÷¾ÙTVDı¸Õi7tU7+ér®mÑ}NSÏxHüÕ&oÕ—tGt’>÷N»@w·Dñ:ïÒ½O]p[¡ÚF¼v¹	ùéªçÖ¸Xax>à™gšw5¦Ä™”Ï6çÁğG?lÆˆ_»¿òŒÿşÂşbNÁn¥ÛàhiÕ<)À-É§„÷-İx³¦¸NNS04mq-›Av_êğœ‚oÑgÇiô ßşÍZ¾…=#ˆ8n98ş6û[úñÃ·~«‘xœ¥Ì;
-1 Ğ>§˜ÎJ™É×€ˆWÉ‰Hv!fÁã+èl_ñæÈØj¯µ+9[,ÌÂØs©D$¶áŒ´3*í³n†pMã~xB“uÁ¥IûY½=z’vâ­_B$mjGtˆê£]æÌJV™’|/õçÒ<Ÿ©xœ340031QpöMÌNõÉ,.)Ö+©(ağüÅ'· øELÔÆ8ï¤'ª6ÜÊã!*ƒ\]|]õrS˜jEW³mØÿíŒX[ÜñhÙÓk¾Ä˜ Br~^Zf:Ã£0OÍßKo(1ı}ÑëY§Ïˆ‚œÄÒ¼ä† Ë?8>ïd®»&ğ@~Ï†Á¿æA­)HLÎNLOÕ«ÈÍaûåwqßÚM§+®ÛK&Zj­qf?“ 1§8¹(³ ¤˜ûëƒgÜ™Y[,ı^û§[õ>]à¿R¢¢´(%A"Dà]ÕôìÒ œM¼l-ÅÎ.ª÷ çb#¼=x­“A›0…ïüŠÑ¦8ìöĞKU¥”Ğ-í&l	é¦'Ë2¸›ÚF4ªúß;&Ù$»ZõÔÂãá}oŞ :¾CÖI%»¡cÒ`~Kòuš­àÍÍÛ(èşÂ…£´B³fdR94¬Âx9ÿ’°8[Ş§wIÎÒ5»]mâí²µíö¢¾€å¼ˆ?%k¸Š[®ê«( àeÉ„îzÙ"Ó½“ZÙğú·-\?à/g8={,¹rRDª’„I~•T%”ØÓ*!Ñş„õ\ìx!ïP9&¼MÈ“¯›4OµŠÔ|\ƒPé¶Õ£T5XrJâ hS¢§I‚0¤òbƒ¡ëæ‰t\º¿9Òœ´ß°öï/ÄıÌ>lÒ»+’u‘®n½ÿ [š3ãœÁfÏ€é‚İÉŞNßD€c#E¢A±³äÎ€ĞıŞÈºq–Äfôz6?}alP?_Ncm¥@e¤õù`é‡á#±z0‚¦FaùÏYt—s¦Zìc¶Y- È7‰÷øtÑ÷B­Ú=ŒÚ6EÀ¡–öúĞÿ2¶kğ¸g}Ò8ñî&€ÿåğ€ûÌßa×¼)66eêĞ:vZÚOZÛÇõ•Ê:šgHhZÌ¸Èòïªdƒ)+h9íiãËÓ¦ÌÿSÚ†|ıê÷}}¦¶š/“?Aä?
-şjxOàçƒxœ»ÃşŠc‚‘@jIFjQrbI|Q~±Q|FùF»>æúÌ¼â’Äœ.…€ ÷ Gß`…âä¢Ì‚’bıÔŠÄÜ‚œÔø’ü¢ÂÒÔøäüÜÜÄ¼öø¼ü”T½‚J .×àO?ÇO?…œÌ$}•j 9^®Î!ñ~¾®µ\A® Z‡YÒ0Ã¸4¹sSóJâ“³ÓS54¹ ÈÊ@¸³xœÍWÛn#Ç}çW,ÀKÊ"G’µÁFI("×+GÒÊ”âƒlÎ49½š™w÷¢‹|A€yÊ§äköKrª{†Iö~
-!äLuõ©Û©ªúFÙX¿©rQh•Xz#L²FÒYá¤™ŠX¶Z}™ëcJ+íq%FÍeo¦õ,“½XçÑTe2J¢ƒûÅå=z5]Nÿ®?z×}9úv¹ü¢Ì¾».•æJ.ş\ÙòO6F³Vë&U–Œ,µUN›%ÅºpB–\*©L—VÅ"£´Á„×S5«ŒpJ{tÕK¹(K¨Ú£ ÉÆF•nD‘Ğğí5R&ª"N‰1B«¦‰QÉLzıÃ¿~şòÕ«@d]§rI<7§'7Pka>`É/¥³º ›Tˆ§j–v39—œQ©3/{tæ¬‡/|±ÒÌ%	K‚œ´.€s©pT=’¥®(™ª€Œ…™ô§4-”Kkğ_Šûû¥7F2°X¸‘÷¾mIóÙsUTw0³tº¤6|™!fµo ©æğ£ÊËLæ èı×éÑ¥v2ÀRø³+ÿÊ„-gl¸â`ÿÍ=”À!"!=õQlh¹ƒ[¼~Ü	˜œ‹Dh‰œ«¸¾ Q	Ú!–pÌÕp0¸¸ºo¨.NeÒkµÚcxĞSç#P¶Ì]D«DH$,Rl…¥¶k’¨ã]• Ä?Ÿ:£3*³jÆyÕÎ´`ØÉ²9KdËîÇNŞ¹Ö‚‹a´°‘5qÔúğğŸïñ÷¬û#Z}v¨-’ñ+rSfË=àBG²ïpy SmØSx¼Ğæ–fT5ñutvZMdw¨'ØmôÜ`úÇ®€w%É"£t­qı±Ëjß¼9»¦áàêíñºÂ·ªÉkÆ‘µîğ:2y2º;ì÷–"Ï½şóFŞÁ™±Êáèº-}J3)y­ö—”ÖaÉ¤±+µµÒ¾Š‘Ÿ(‘EªP¸’ì3ß¥¡Æ#®´ÑDâk/<é•Kz"\™dº)Ê¿{w"6ºApÕğáP ×«ÀI0ÎfœÀgıµiµâáà¤1èå	=ù ?8Øéˆ”l¢ø°ÅK£Ç§O?û¬ñ
-Â‰øÖs(&ál^'|Á¼%2]Ì	pµæ ºrÓšê;-ÚòJ8«=Sn[»˜ÄB½´,k¬§™°àHpÎîÑ@ÍdÁ5iÔ\g"ä›­µ6ú|Á5ÿâ5ñêf	Ï=_]-2ú*t§
-Ô¥fà›‰N–M¥Št1Jİ×HCíµîÜ"fğ:–òV #Ô¿˜ËÓÅH5M±ór öõ„™¯ºh‡jéƒ£;^ô»ßuöéTĞÑşáfIoY\×F²\suD§:Ï™ìVúAm+v\¡$y‡ÖŠ™,ŸE¹ÇIe«\&ÑÂ(JgÉm0³oFí”‹Rï0¹²Ş€Õ ²Õ“›YÔ1'@„~¥b¦CöSaP”Jà¹°ÈnafhºğÚû¤o,wÍú)MÎ7›2ów«µñ€ÚÜkê”N|ÑıÁ3¯ïĞw®s¼¢üwşÔçoWehïÑ£byîİv}„w£B'’ièQAÏÁdà|íY%ÈRDW§Ê¢¦¶g*£;VL·
-Ó´ÊBŒ6´†~ùãÌA0òÓ‹*e¦
-¹!ğ+ØÖB_+Ëo#º>?¹ØÌNL[R²öËıïÿåg	€CR¿]×Ä‡‡¶è·|˜FÛÁÿ÷cƒ7ä¥t¾U#§Š.Føë¶óÿ¸™š¶‹SjÀo—e(”úªRh" ãèX7Íô¢ÕÚİ=èÑ_*•%»»­!æ¿0²p¹qï`7Ø’ËÛhÔW{ü}ÿl88½y;üî‡¨™Æ´nYH1w½\ÜbÖHE1“–ïŸ›¶b-Mø*êví2g¯vëI)ÀÜİ=ìÑµ®LæõA1WF<Àn¢Ãx+Š%†­fm“ûIw"QìLB2®†ëmoØŞ
-‡ê#]ºŒ½ã‰;²ÒUeoSà9C£í¦xüóûÂd òÇJ¡ÓØV‰sãÆ!½65G`eÿ2öÇ÷m± q„1:jäöÇ04¤c˜®×¦ìbÊgo¥)P¹N*¬mdApe˜bÂÄ_ÈØIŒŒ¬ïZ±ËxÊ€¦¦k iè°1Š¶z(§—,´Ÿ ²; ÆGİ˜^|Ìİô)&¬ ó3zÜjyÖÙ,ì{m½ã=?Óscá‹¨õşÃøMÍr×ÂŠ!ªÌñ„î_ —¯OT.]ŠÌ3a8l=éaı±’«kvGğ¨öqµØS‰«‚×Üªôû|ÈÙØ2suH~áóaµÂ™¹²•ÈÔ}5¿bQV/”òß¬çS_NªÙŒ“½éÅƒ Ù¶ZoKé÷L!µƒ‹“Îº`0lgá’…ÙªŠ‚u†5¦D®Ôe³2gZ—ÇÈyÚİ=Wp wwä
-î|‹·Ç»»4ö
--?ƒØØ¸vĞ“ãÁ|å'ÉªƒÚ˜"tHNQËèØ´È8Õ½ÓÈ¶‘õCĞùµ4jº\gcXøÖ§›´e£Fj=ØmkÙÜ>~UÑ†`PĞÄ Î
-|¯xÙ|lEYM¨¶pCG´J"ë’Qng6Â¿è5 ¸ß] -Õ‰1bIŸü=NÓ÷û½—?üô	Rºõ?4A¦xœ340031QHÎÏ+)ÊÏÉI-*Ö«LÌÍaøıÔ::Ûè¦Ûl‹LoswÄNşeQ[”›_aoh QÉ§ı-ôÓeççÎpä¹nabık –!Ğ´xœuKÂ0D÷9E.€Z¶]R‰[`™ÆE &®#ÄíÉ
-H%Gš7L*<M$à1à™¤3Ö
-G€=)IÌ’µ·Ù¡Hİ¶mkŠ|åKPˆšÙIİ€QkL>ú˜“ı©9dı˜åİG­¹4,
-ÃRğ71Á;ŠKÜ§âîË×ì+ê+é`ÌjæêgKáø~rc•¢‚ge‚
-H7ÉˆAHËİ«²yÛvgé€/xœ»Â´”y‚õD›M¢Yù™y%ñÅ%‰%©ñIEù‰)É‰Å%¤'K0*N|› V °Cxœ•“Qkƒ0Çßı}iÁ¶±í´Œ–½•µï’™ÈÍ¹;Ëèwß©mª[›@ —øÿ_îw@§"(Ã&&Ö^*:ˆ…¬dlF“-­L£(Bs	7Ã²ğ^¾­_a¸á¹‘ÆO°Aƒ¦°Â4åJÀš>²t&Ğ· Æ+!ËJÅqIh„Ÿ\)™ä~½«îü\.¹lÁlÈ‹à²Á2éC+ã¸6„Sé(De4&Á7jaƒ/CŸ;Ü\vÊ§(d€Q€™ÔÜÄ¨Z;Â€Vx„ÕvÃê¯B:=§×¸ça2ŠPhGE&·	ûÿ}Şìî¦¼LyKş‘ßˆ×œ+àú)l7òÄÛtğ~¾wOUÎéæ•K;Ù*Pä5ìîÌ_îT”ZÓ/æYô‚›Ï:ô2Ìã¦OZàz¤W÷Iïe‚al7H{ŞŸív]…ëf;Z¿0NQãpxœ•PËJÃ@e’¶–àF±-
-âU7
-m™4šÚ¬|ìÕ¥ .†ÎDISšIiÑøa~ÄOPü—‚kï¤Úª¸q3çqÏ¹Õw+_i•{VşÖ¾³0Ø4³’È³ Zp¸˜xĞi‚œŒS9Le†(‚ŞÙóÅšÔ´üöZ½mÂÔYW—fi‡Ÿ¥¡ô€f°ç1ôã(bZ)F>ëfÍğı*Ô=9­¸nÛu»ê™xkÚnæb›Rª¶Ì†*‘‹¦×gÑ€N:¾Ïqd}?EåÑ7!îÅÒ]f«™óm¦"ã¯–i½éA·ç¸==‚ô?³×Ô“¹ú®«Wó¸ŒŸö¡~nZ¯¤Eà"aF6ª˜ ‘L
-µG6İû„sÁAÆ0ŒCŒÅŒğw¡=—Š*™õÖ“’¢ xœ340031Q(I-.‰OJÍKÎĞËI,Q•ÛŸÿq­ˆ¯±w^Àbiñ<Ä¦¹	 !*¶WxœÅTÁ®›0¼ó¾¤„'õø$Ní±ªzê%Š,cpØÈ^¿$ªúï]!Ğ´}z¨/	ë™ÙÙYİÖ!³>©íY'ƒQ-ÓSõãøô¼rz@mÍ”ûPzÔâ…¿RŞÛ¾—¦Z…³>—jûd+¸ÃÒÉœ¨n-ÊçëíÙ…™LƒB›
-Îb¸`k‰¨ÙÀBk Å\¾•D¥(´î’$Ô0à$‚˜¬z§ÙsÂè/ÍÄeÅŸôR~Ò^YÑÈ­¥
-ÁUµ¨uÆI±Í¿ZmÒEzÇxqúDğ(JˆÇR~–ÊÙYÈÙÒâè‘”¶‘¤söéFZKßc¶c¯%ğ2@áÑMz“(`pæ~İéa¼'.,]ÆP¦
-®¬Ag»öFí©äønƒ„3¨€²ìL{~'f†0$úvy|qøÆoÓÎøó*ï[êúü6cj]ë†OßfÛ>¿È¾ãÙq«gNíÚ•Ël÷7¡L.=Æke§}ûF.oãÊæø¨ã‡Öèy2wéš‘äÇä¯•ÎÊJI‘Áø~ëµ_z1şôÿ{¨kú7Õà˜%? |½õå‚MxœûÆµ“gC£@jIFjQrbI|Q~±Q|FùæÆ2ÆÍ×™æ0M~Í,/VYœœ®hr.³tqjEbnANj|I~Qaij|r~nnb^
-HI|^~Jªº—ÈKÌMµU‡ª-êL-BS‘_ZRPZb«^œ\”šš‡$©	aÆjr ¼9È´&xœ}RËnÃ ¼û+÷‚ÓÜ"Lzè1U*µ‡Ş,
-›Œ¤¤_ğ£MÔª²8ìÎÌÎ,˜m/Ö ğA»¾Á+Rã-¯XéŞY§À ÎÃ¡Á]ŒÃ†RåRoœPÄ»@œ?Ò ;°‚BÄÚƒóVÄ5¹…Ñ„ÅÏúğ=!¥DÒzÔŞ×õŠ¾=í^FŞè;ÏAÓœ¯1¯b½°À“Òµ]juÁ„FG 0æxMòÇèRHA^±Ô¯ûÇı=Ï.W£×´"³"ûäåtÚ4Øhãµì„WİÃ±´ˆtó¹Çèb`´Ì‹Ãì¹›ªì)ğbò\(Uá¿ŸµQÑ9Ó*ÈW¦xŞ­­´â”7ı…š!ŞÒMÎĞŠstŒ^ƒÿó¶„¹¡>\çc‘.éÚò˜äšúEC[ş	^}ÅHÕ˜ëCxœ{Âò‚eÂFÔ’ŒÔ¢äÄ’ø¢üb£øŒò{—3 ¤¢¯®xœ340075UH­HÌ-ÈI/É/*,MOÎÏÍMÌK‰/Ê/ÏËOIÕ+¨dÈÑ•o«ú–­î¸{©IdÿV§3wÓÃò}¹ªxœ­VÍnÛF¾ó)¦2
-‘…KINÜƒ H‹MÚºìöb‹9”¶^î²»Ë$J›çê½OÖYş‰"iÇªMîÎï7ßŒçì‹EiÍb+ÔÕ[(n¯Õ³@ä…6L"‹C×¯±Ò)BsyEïõu)ËíÎÆôhoš»oÿRJ'^Ã3•Õf$ıZå®wØºv"Ç H$·®HœĞê[ƒüwúG´€~)fÀ˜PÂ1Z”Ysî¶,Ğ„QÜİÏñ=Ï‰Ìióg‰,ÑyÎUÊŒ¶Ìg7ºd*.Ê­v†Á¦>I(
-‡¬»G©Ã|YFiyåŒ–Í¢ñdçç°Z¼Ørk#
-ŸåÀOÿ*<âä}üá¿˜õŸŞj¥Õ;c	—rË“ûS‡§“Ò$B[Ñx_ÆËi™·(u"ÜaJÆq³C× :äêc#‰Ù›ß~¾ş~gP½€6ğİ¯/¯o&¤}>¦ç)ú?±„IÁM©0BŸ²^¯À`Z&hˆ¤5‰Ö S{±£â.]Qİê¸·F`&C
-H‹ÇÌVñ³ËÚÓÕ¿ÿäN“biç‰\M›LKÃ;Ì/.Éâêr™[°{n
-¸Éı š[××¢P|tMD£¤*	¡v‹‚—Ó*à±3šUg!UmuŞ:«˜Ë¤ÖEäC[.áÇ§†|Å¥Şíª*Óá¬íUhšnj`|¿Â+êAÁ¥ø€i<‹‚®{§H[uò9Ğèµ³È@¢
-é0n	ÁX%#v_ívy7eµ¥ø§¬öZ¡¯æ­vYõÎ%¥ß=Àd”¼ ÒÑ­—ùzº‚~ìı®êÚj"öa‹È}¢B†©(¡â+¸XFğ%ñŒìPy„Ùì¶Šå®áÀşÇñ±î¢¿á¶­À°tëø"ûØò¥_Õ‹ÍTW=g7~ªa3{DètêA¯HcÜk{OÀ½?GH¯>éÊûiòñLIäw”C‘–Ìëøù“`?KŸ‚½¦ççÁî7†ÍxµèuoÆ”;Nb·cğï†S¸ıßŞ¾ú@	ûîÍ¹P!)ÛÍ•VíªQoA~•¨¯ü£v^mF›ÉU¥pæp„¦¶crák	|Ÿ`áà'<l57é+åĞ˜²pGµ‚¶¡ê#ŠÆdÏ Å_•âÿ½Ÿ1òëÍ-±í.ŠzÃÂHÑ’åCµTõ
-Ôd¾/]ªß)º„ßŞÏ‘1Ïú9czÆæuvU¢à?¡‰Dü¡xœ340031Q(I-.‰OJÍKÎĞ+-JIÓ«HL.ÊgĞ°kwğ:.yxÅ*Ë)Ó&²‰ –ìx´rxœ½UÁ›0½ç+\ÔC{HÑV•V„Õ¶İco½[1à®±©mBØ¯ïØ²‰¢lµ‡*"Ø7ö›7È­Dn¬Ğj—d›4y(V¹Ñ{í„”½?Rfô.iœëî1†ac´İhSãA<Â	R´å»d–iâ¸udÏk’b…P.…z€=µœøyˆ@ì lO%©¨…BÇñe—¤›4C)Jdº¦aŒ§È©¹n¹3c‘³ö*¹A†–¢·!óK‚$Wµkü,Ë /ÇKÆ¼EK7‚Ê™–¤(åLK›Õ{’Ñ|M»ÌI‘:¹û±¯É.êR´ÔÚËz#ë5úI¡î¥’½.G´^/ˆkºÀí¿Icxy!Œ—d®·d¹^ï£[¤`¨ÓB¹PôY'Ø³P5Ò½¤©”#rÙFÈhGxô†4_&i¾¾)M8M¼ğuçs¶áïİz„ß?ZÄû²Ï¢6$,'È¬3­œP½îëtÔpHóÛ¼~b…9k„,côd»9JÂF¥@—ì”E¥Ø›IZ#¬×‡¼."ÇÔDû-ñ¼ŒÕxr7Œº_pà·ğÄGúv´·3õ†šr ú‹¨ì¡ué¤4^BxŞîG˜æ8Â–,jhO†ê@j" ) }ä*.ò%•áz`8&E–gäøÄou»9AVä$8·¢ŒGl§­ğ2Fá®ƒ\j&ÜxÄ«J!L·-Uåû@†[îHE{ÊTör´%9•¹xí¢?5WàkF¦u‹ŸØwñx—nC£Îût¦>¸‹ÚË!Ùn¬¤î­W‰:)>~ªàÕ†¦ÍB1¸³>ã	†}aÇ;’¥›‘¶òÕŞ9^4€ïÎlpX~ío	_ÁbõÍ;„î³_xœ áÿùù;Yç®P^L¯ÿšÍÊĞõÜ‘OªĞÀ-é¬gxœ»¬|NqÂé‰7x‹RŠósRs*Jò'70Šğ%+$*”¤—(¤¤ææoşËÍ¸y³"Óæß¬7¸¨¹†î´Rxœ áÿùù;"fHµÂ.°"©¦–‡ıçbAsÚ˜æ‘OªÚkcí­Zxœ±NÃ0EE€(-0ÂÒHh¾el+U©b‹‰_Z+ìgJÊÌDå‰o@Ê0²°°ğ/,Dlg8÷H÷ûÌ÷_›§ñæÇøçà«yß>	šßİ~§´D˜kSØŠeèÃAçñ"Ñı8<Z3ÎAá
-r!Ñ Ô\ä5¤É”8–lL”@ÈtYµ$ÃaËc¸nËiÙº”B‘P–˜”)ä’- •u-ÌjZjLq¸¹œN ¹ ®âŒÎ™#]2Y;¬a%Z×¼sÂµ Öò­’Ç¾
-ç;xÆ†©íúY÷pïÿİ±¬hX÷m«ùØ?ş ïß_ÆàxœU‘ÏJÃ@Æ±·&ŠàÍ“sò"–Ö7-´‚ZBADD§Ùi³4Ù»›hz)¾» HßHñèÍ»NRÿ ìaggæ÷Í|[n}ÀÃëúÎB¨•#Å4VÇà4˜L‚•jó3™\r8²%º'Ú¸H>5i,'™!ñĞ
-:ívoRYG(@¹8dIqÄ…)gY%¤
-rË	
-ª‘Ur~+)@iæƒ Û=¯‚!¤èÂˆÄóËz³ülnû‡ı {0<Î/Ëos5Á)A¡š-ß½³ª²ç_ÿ«{òwoşãÊüo¡jÈzÓ©0‚QÁÃŒ1‹]µÛ €î0IÙš´pOkC#S·l¶¼›eÌMÆÚ:Ip×ÔDs¢
-l*™’“)¸&«Pû–ØBa[gr9Û«<5T¸45—6ÃXÎ¨fı~‹\ÎÕZÜ¯m4÷æuªQ§xœ340031QpöMÌNõÉ,.)Ö+©(a˜ÏxYô*ï±ŞÛ—d~,j¸¯°y‘!De«£‹¯«^n
-ƒêÖ']+¾p$ŸÚ{ÚõŒZ¤ë†•Ö&@ œŸ—–™ÎğşãÍı]…²´+Ø>o]ÉÂrîÈ%ˆ‚œÄÒ¼ä©Ôé½LşšM|ºwÛ\U‹ –W•¡Ö$&g'¦§êUäæ0L¼øÉ5ñŒ«Á·D“w¼z,k<£˜WAÌ)-JIcğ‹xqfâs÷ãÇw‡º°vvjúi ûÈVl¦xœ340031QHÎÏ+)ÊÏÉI-*Ö«LÌÍaÈtOe¿÷X}÷¾ÊÍæGû;³œQ0„¨-ÊM‰¯0‰74€¨|¼eÔ!ó¹­U©Ïø|–ì›b4) Y!Š xœ340031Q(I-.‰OJÍKÎĞËI,Q•
-½\s¼–+$³?ùmï«Í“¤4] ’àì¡xœ340031Q(I-.‰OJÍKÎĞ+-JIÓ«HL.Êg¸4ëÊá"ìÊ¢şÖŠá	{< ¨XêXxœ[Âw‹cB“¾İä@FIFıÉÌ}“XnÈØè$%æÚq) ~FbQJybQªX`²«ªa•œìÍÊcÀ˜ª j>«:„’|ŸUÄ|Ïª1¹˜Et²›öd6µÉ…lš“§±éğd”Çgæ•¤¥%&§N¾Ä¦$±459>7?¥4'æŠ¬| 2 g2» gõ2ºîƒExœ»Îxq‚µãªPÆ¹Í7ÕıóºgNŸ"/œ3Ñ¿ ¹5êˆ]xœMK/AÇÓ^¡—Y.ëJvÆ#BD"kã¶"aCœ&m¦6ÓvL¯î^c/ÄA|€vğ1ˆáâ(|‰ˆ›Î Ñ‡Jç_U¿úW™‰§ñâÃHm J}h”5 ö™R3mUsÛvõXhë4ïİ¯æ¹§0¸àÂf“Ç!èá@ÈºjØ&jÌ_xe¢—r?Uf™N¯•·Y+\iåês=BB N<F(ÏÎÚˆ.­ZV±¨Z'1OêE(ÍâØÜÑıÎM¦"j>(jFsÃ6®äJ¿êe®2I—\¨°fD™¡=Í‚:¥»xÚä¨f(Ìgn~ÊñÌÛ²%²\ªÎC‚:µŞÁª<°2àãNo7™úĞ¨´„ïÆÙ·Ñš¡ÔÜô]wdwêw†
- …Z-<€ØnJi–*9Åõÿ)"Ş±°tß.hÑ?…û(y­“aÊ$B,Xˆá˜{gºë—õæŒ0_ÎØŸ0š²ÂjşĞo]]¿î†qxœ áÿ××;ı7Å:½êgåùª2wôzÚœì
-‘OˆäPeë‚.xœ;-·PdÂee…óû§¿ßÑ¯\Y\’š«àX”œ‘Y’š\RZ”ÊÅ5ñMñä8Æ¦ÉÏ'Û0ğ¹d&—$–¤+„{x:{LÇ”?YÙar1³áäÌß˜Ô&Ïg‘cäÚ|”³–É15¯hH±BIFªBh°“®³BJ~^zNªBf±BR~i^Š&WqiJ¾‚~jI²~f^f‰^
-™‘Z”œX¢P\’X4¹çùä|ŞL‰°ÌÔr…Ää’Ì²T…¼Ô’òü¢l…”Ä’ÄÍïycrâJóä€Xxœ[(Ò"2áÉfÆÙÌÌ			›ç³4± Nøî‰xœ»Îxq‚µÈ¹–/²;–M­=a[t£ÃÈ«iâ¶¹ı; â„ñ5ÿËB>Î¸ eÎ4Œ3¸^iRIDX               !         (      %            #      '   $                                    	               &   
-      "                    ñ5ÿËB>Î¸ eÎ4Œ3¸^i#X(şš=·øc„I¯*öY	RÿtOc                                                                               
-   
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         !   "   "   "   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   $   %   %   %   %   %   %   %   %   %   %   %   &   '   '   '   '   '   '   '   '   (   (   (   (   (   (   (   (   )ªUømXƒÙ'On‹˜1—”l}«°¿öÌ†^Ç[Ëı|ô\%3`(H£Å™EÙê¦Ç#Dõàæij´9NëOg:å O©,+öUòÓ,çÎÌnE´ ñ]=ı7Å:½êgåùª2wôzÚœì
-_oÌÎ¬3á;’ÊE,uÿ¸úNÑ¾­²Ëx×?a9*¬CÌ`Tîz—kuPHl²„sCD%ŞYç®P^L¯ÿšÍÊĞõÜe—ñJ4ı6‘å½¶%8Rêã# 
-œJ§ c÷Éö½ê³’)EÅ"fHµÂ.°"©¦–‡ıçbAsÚ˜æ%µøÉExôcÊ½ËEÌ&YE°©;-P>‡@MÇÃ¨ª9ˆ”–q/Ó¤a¸?*Õa‰ÚÀëê¹Í	¥<4x¼%ª
-2b”f})œŸ-=¼ƒIú sè\Z±^Kbä%<#Á^J[mcRÍ¡/´²³Öœ0ÉêÙNXèÌ¿açGÇÆa»UD‰‰)N*P9ü(ğó¹~Öà¼°àSúX=òiÀ«ƒ¯î
-õ)ÿAÒX|ZëÁéÊ"'†¢L|5—yßiG`Şã'»¾y³7Å£CÌ l-†zök'A»¥4nµBÌİgrX3ı°ƒ1SŠd¡ÖÁy+rxlâ‰e
-ÿT¥O+6ºŠğ™"ÑCoÜ‘ÑòEaÌE0öa4î.¬IZªŸÓÕÆTÛÒø¢€ß ³¢¨á{’6fŸhÿ?YNn·‘¢ğ·çüE{X_|?C«P98çT<ƒ‚Ä&"_î@ö¼ÇÆÉzùÄx±SÎ„ô¸¦•}È=rØˆ2J‚‘¶ Ïtc9OpgÊ±å&j >8h"ÍÒšÔÃø00#O;!W`¼H`âVI)ûˆ¥Ø 2Ì5÷kÑJæ‰LØã¿©ZÂ7…zeæL¤¾’T2’XîicL6B°£5L¢yë€ïÄW¼ïñÙ¿@ŠqĞ+xóµ©ÎÄÒ÷a[å;[k2ÙF›8iHö¸]“úÿ<Å¯­é¾’>"²0RÊŒÇŒi[b²G´;a¯ümšÀÒl½G_û£¿Êãşyok¿™>d}PŞÆ×æJ4¯^`T¿Ò3¸(®ög&¸\±¾7`Ív>Y×cÜêã«Ñ41uO&Á2€‘÷`¾–»×n£ùs®µĞ°´è¤Y» ±kdr˜ìëRüĞ§N%r70ÁîúÜœ¥5™Óc'‹úP7ƒe b€öÊŞ  2?    
-ï  %ç   ª  4Å  /Ï  %¿  )ß  ,ï  0ÿ  "&  .i  -b  *  r     f  ,Â  18  !î  -5  3À  U  &/  æ  2  $|  V  ƒ  #ó  4æ  3í  Ï  1s  û  :  c  0¥    bñ5ÿËB>Î¸ eÎ4Œ3¸^iÔ`yêéùû=KY ø³,jf0000000000000000000000000000000000000000 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792460627 -0500	clone: from https://github.com/li21rich/wisco_ethercat_ros2_hw.git
-0000000000000000000000000000000000000000 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792514333 -0500	branch: Created from main
-0000000000000000000000000000000000000000 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792514415 -0500	update by push
-0000000000000000000000000000000000000000 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792460627 -0500	clone: from https://github.com/li21rich/wisco_ethercat_ros2_hw.git
-0000000000000000000000000000000000000000 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792460627 -0500	clone: from https://github.com/li21rich/wisco_ethercat_ros2_hw.git
-3478bc25aa0a326294667d29819c9f2d3dbc8f83 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792460700 -0500	checkout: moving from main to chained_actuators
-3478bc25aa0a326294667d29819c9f2d3dbc8f83 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792514297 -0500	checkout: moving from chained_actuators to main
-3478bc25aa0a326294667d29819c9f2d3dbc8f83 3478bc25aa0a326294667d29819c9f2d3dbc8f83 cbarker5 <cbarker5@wisc.edu> 1792514340 -0500	checkout: moving from main to cb/chained_actuators
-3478bc25aa0a326294667d29819c9f2d3dbc8f83		branch 'cb/chained_actuators' of https://github.com/li21rich/wisco_ethercat_ros2_hw
-3478bc25aa0a326294667d29819c9f2d3dbc8f83	not-for-merge	branch 'main' of https://github.com/li21rich/wisco_ethercat_ros2_hw
-#!/bin/sh
-#
-# An example hook script to prepare the commit log message.
-# Called by "git commit" with the name of the file that has the
-# commit message, followed by the description of the commit
-# message's source.  The hook's purpose is to edit the commit
-# message file.  If the hook fails with a non-zero status,
-# the commit is aborted.
-#
-# To enable this hook, rename this file to "prepare-commit-msg".
-
-# This hook includes three examples. The first one removes the
-# "# Please enter the commit message..." help message.
-#
-# The second includes the output of "git diff --name-status -r"
-# into the message, just before the "git status" output.  It is
-# commented because it doesn't cope with --amend or with squashed
-# commits.
-#
-# The third example adds a Signed-off-by line to the message, that can
-# still be edited.  This is rarely a good idea.
-
-COMMIT_MSG_FILE=$1
-COMMIT_SOURCE=$2
-SHA1=$3
-
-/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
-
-# case "$COMMIT_SOURCE,$SHA1" in
-#  ,|template,)
-#    /usr/bin/perl -i.bak -pe '
-#       print "\n" . `git diff --cached --name-status -r`
-# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
-#  *) ;;
-# esac
-
-# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
-# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
-# if test -z "$COMMIT_SOURCE"
-# then
-#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
-# fi
-#!/bin/sh
-#
-# An example hook script to make use of push options.
-# The example simply echoes all push options that start with 'echoback='
-# and rejects all pushes when the "reject" push option is used.
-#
-# To enable this hook, rename this file to "pre-receive".
-
-if test -n "$GIT_PUSH_OPTION_COUNT"
-then
-	i=0
-	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
-	do
-		eval "value=\$GIT_PUSH_OPTION_$i"
-		case "$value" in
-		echoback=*)
-			echo "echo from the pre-receive-hook: ${value#*=}" >&2
-			;;
-		reject)
-			exit 1
-		esac
-		i=$((i + 1))
-	done
-fi
-#!/bin/sh
-#
-# Copyright (c) 2006, 2008 Junio C Hamano
-#
-# The "pre-rebase" hook is run just before "git rebase" starts doing
-# its job, and can prevent the command from running by exiting with
-# non-zero status.
-#
-# The hook is called with the following parameters:
-#
-# $1 -- the upstream the series was forked from.
-# $2 -- the branch being rebased (or empty when rebasing the current branch).
-#
-# This sample shows how to prevent topic branches that are already
-# merged to 'next' branch from getting rebased, because allowing it
-# would result in rebasing already published history.
-
-publish=next
-basebranch="$1"
-if test "$#" = 2
-then
-	topic="refs/heads/$2"
-else
-	topic=`git symbolic-ref HEAD` ||
-	exit 0 ;# we do not interrupt rebasing detached HEAD
-fi
-
-case "$topic" in
-refs/heads/??/*)
-	;;
-*)
-	exit 0 ;# we do not interrupt others.
-	;;
-esac
-
-# Now we are dealing with a topic branch being rebased
-# on top of master.  Is it OK to rebase it?
-
-# Does the topic really exist?
-git show-ref -q "$topic" || {
-	echo >&2 "No such branch $topic"
-	exit 1
-}
-
-# Is topic fully merged to master?
-not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
-if test -z "$not_in_master"
-then
-	echo >&2 "$topic is fully merged to master; better remove it."
-	exit 1 ;# we could allow it, but there is no point.
-fi
-
-# Is topic ever merged to next?  If so you should not be rebasing it.
-only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
-only_next_2=`git rev-list ^master           ${publish} | sort`
-if test "$only_next_1" = "$only_next_2"
-then
-	not_in_topic=`git rev-list "^$topic" master`
-	if test -z "$not_in_topic"
-	then
-		echo >&2 "$topic is already up to date with master"
-		exit 1 ;# we could allow it, but there is no point.
-	else
-		exit 0
-	fi
-else
-	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
-	/usr/bin/perl -e '
-		my $topic = $ARGV[0];
-		my $msg = "* $topic has commits already merged to public branch:\n";
-		my (%not_in_next) = map {
-			/^([0-9a-f]+) /;
-			($1 => 1);
-		} split(/\n/, $ARGV[1]);
-		for my $elem (map {
-				/^([0-9a-f]+) (.*)$/;
-				[$1 => $2];
-			} split(/\n/, $ARGV[2])) {
-			if (!exists $not_in_next{$elem->[0]}) {
-				if ($msg) {
-					print STDERR $msg;
-					undef $msg;
-				}
-				print STDERR " $elem->[1]\n";
-			}
-		}
-	' "$topic" "$not_in_next" "$not_in_master"
-	exit 1
-fi
-
-<<\DOC_END
-
-This sample hook safeguards topic branches that have been
-published from being rewound.
-
-The workflow assumed here is:
-
- * Once a topic branch forks from "master", "master" is never
-   merged into it again (either directly or indirectly).
-
- * Once a topic branch is fully cooked and merged into "master",
-   it is deleted.  If you need to build on top of it to correct
-   earlier mistakes, a new topic branch is created by forking at
-   the tip of the "master".  This is not strictly necessary, but
-   it makes it easier to keep your history simple.
-
- * Whenever you need to test or publish your changes to topic
-   branches, merge them into "next" branch.
-
-The script, being an example, hardcodes the publish branch name
-to be "next", but it is trivial to make it configurable via
-$GIT_DIR/config mechanism.
-
-With this workflow, you would want to know:
-
-(1) ... if a topic branch has ever been merged to "next".  Young
-    topic branches can have stupid mistakes you would rather
-    clean up before publishing, and things that have not been
-    merged into other branches can be easily rebased without
-    affecting other people.  But once it is published, you would
-    not want to rewind it.
-
-(2) ... if a topic branch has been fully merged to "master".
-    Then you can delete it.  More importantly, you should not
-    build on top of it -- other people may already want to
-    change things related to the topic as patches against your
-    "master", so if you need further changes, it is better to
-    fork the topic (perhaps with the same name) afresh from the
-    tip of "master".
-
-Let's look at this example:
-
-		   o---o---o---o---o---o---o---o---o---o "next"
-		  /       /           /           /
-		 /   a---a---b A     /           /
-		/   /               /           /
-	       /   /   c---c---c---c B         /
-	      /   /   /             \         /
-	     /   /   /   b---b C     \       /
-	    /   /   /   /             \     /
-    ---o---o---o---o---o---o---o---o---o---o---o "master"
-
-
-A, B and C are topic branches.
-
- * A has one fix since it was merged up to "next".
-
- * B has finished.  It has been fully merged up to "master" and "next",
-   and is ready to be deleted.
-
- * C has not merged to "next" at all.
-
-We would want to allow C to be rebased, refuse A, and encourage
-B to be deleted.
-
-To compute (1):
-
-	git rev-list ^master ^topic next
-	git rev-list ^master        next
-
-	if these match, topic has not merged in next at all.
-
-To compute (2):
-
-	git rev-list master..topic
-
-	if this is empty, it is fully merged to "master".
-
-DOC_END
-#!/bin/sh
-#
-# An example hook script to block unannotated tags from entering.
-# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
-#
-# To enable this hook, rename this file to "update".
-#
-# Config
-# ------
-# hooks.allowunannotated
-#   This boolean sets whether unannotated tags will be allowed into the
-#   repository.  By default they won't be.
-# hooks.allowdeletetag
-#   This boolean sets whether deleting tags will be allowed in the
-#   repository.  By default they won't be.
-# hooks.allowmodifytag
-#   This boolean sets whether a tag may be modified after creation. By default
-#   it won't be.
-# hooks.allowdeletebranch
-#   This boolean sets whether deleting branches will be allowed in the
-#   repository.  By default they won't be.
-# hooks.denycreatebranch
-#   This boolean sets whether remotely creating branches will be denied
-#   in the repository.  By default this is allowed.
-#
-
-# --- Command line
-refname="$1"
-oldrev="$2"
-newrev="$3"
-
-# --- Safety check
-if [ -z "$GIT_DIR" ]; then
-	echo "Don't run this script from the command line." >&2
-	echo " (if you want, you could supply GIT_DIR then run" >&2
-	echo "  $0 <ref> <oldrev> <newrev>)" >&2
-	exit 1
-fi
-
-if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
-	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
-	exit 1
-fi
-
-# --- Config
-allowunannotated=$(git config --type=bool hooks.allowunannotated)
-allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
-denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
-allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
-allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
-
-# check for no description
-projectdesc=$(sed -e '1q' "$GIT_DIR/description")
-case "$projectdesc" in
-"Unnamed repository"* | "")
-	echo "*** Project description file hasn't been set" >&2
-	exit 1
-	;;
-esac
-
-# --- Check types
-# if $newrev is 0000...0000, it's a commit to delete a ref.
-zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
-if [ "$newrev" = "$zero" ]; then
-	newrev_type=delete
-else
-	newrev_type=$(git cat-file -t $newrev)
-fi
-
-case "$refname","$newrev_type" in
-	refs/tags/*,commit)
-		# un-annotated tag
-		short_refname=${refname##refs/tags/}
-		if [ "$allowunannotated" != "true" ]; then
-			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
-			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
-			exit 1
-		fi
-		;;
-	refs/tags/*,delete)
-		# delete tag
-		if [ "$allowdeletetag" != "true" ]; then
-			echo "*** Deleting a tag is not allowed in this repository" >&2
-			exit 1
-		fi
-		;;
-	refs/tags/*,tag)
-		# annotated tag
-		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
-		then
-			echo "*** Tag '$refname' already exists." >&2
-			echo "*** Modifying a tag is not allowed in this repository." >&2
-			exit 1
-		fi
-		;;
-	refs/heads/*,commit)
-		# branch
-		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
-			echo "*** Creating a branch is not allowed in this repository" >&2
-			exit 1
-		fi
-		;;
-	refs/heads/*,delete)
-		# delete branch
-		if [ "$allowdeletebranch" != "true" ]; then
-			echo "*** Deleting a branch is not allowed in this repository" >&2
-			exit 1
-		fi
-		;;
-	refs/remotes/*,commit)
-		# tracking branch
-		;;
-	refs/remotes/*,delete)
-		# delete tracking branch
-		if [ "$allowdeletebranch" != "true" ]; then
-			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
-			exit 1
-		fi
-		;;
-	*)
-		# Anything else (is there anything else?)
-		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
-		exit 1
-		;;
-esac
-
-# --- Finished
-exit 0
-#!/bin/sh
-#
-# An example hook script to prepare a packed repository for use over
-# dumb transports.
-#
-# To enable this hook, rename this file to "post-update".
-
-exec git update-server-info
-#!/bin/sh
-#
-# An example hook script to verify what is about to be committed.
-# Called by "git merge" with no arguments.  The hook should
-# exit with non-zero status after issuing an appropriate message to
-# stderr if it wants to stop the merge commit.
-#
-# To enable this hook, rename this file to "pre-merge-commit".
-
-. git-sh-setup
-test -x "$GIT_DIR/hooks/pre-commit" &&
-        exec "$GIT_DIR/hooks/pre-commit"
-:
-#!/bin/sh
-
-# An example hook script to verify what is about to be pushed.  Called by "git
-# push" after it has checked the remote status, but before anything has been
-# pushed.  If this script exits with a non-zero status nothing will be pushed.
-#
-# This hook is called with the following parameters:
-#
-# $1 -- Name of the remote to which the push is being done
-# $2 -- URL to which the push is being done
-#
-# If pushing without using a named remote those arguments will be equal.
-#
-# Information about the commits which are being pushed is supplied as lines to
-# the standard input in the form:
-#
-#   <local ref> <local oid> <remote ref> <remote oid>
-#
-# This sample shows how to prevent push of commits where the log message starts
-# with "WIP" (work in progress).
-
-remote="$1"
-url="$2"
-
-zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
-
-while read local_ref local_oid remote_ref remote_oid
-do
-	if test "$local_oid" = "$zero"
-	then
-		# Handle delete
-		:
-	else
-		if test "$remote_oid" = "$zero"
-		then
-			# New branch, examine all commits
-			range="$local_oid"
-		else
-			# Update to existing branch, examine new commits
-			range="$remote_oid..$local_oid"
-		fi
-
-		# Check for WIP commit
-		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
-		if test -n "$commit"
-		then
-			echo >&2 "Found WIP commit in $local_ref, not pushing"
-			exit 1
-		fi
-	fi
-done
-
-exit 0
-#!/usr/bin/perl
-
-use strict;
-use warnings;
-use IPC::Open2;
-
-# An example hook script to integrate Watchman
-# (https://facebook.github.io/watchman/) with git to speed up detecting
-# new and modified files.
-#
-# The hook is passed a version (currently 2) and last update token
-# formatted as a string and outputs to stdout a new update token and
-# all files that have been modified since the update token. Paths must
-# be relative to the root of the working tree and separated by a single NUL.
-#
-# To enable this hook, rename this file to "query-watchman" and set
-# 'git config core.fsmonitor .git/hooks/query-watchman'
-#
-my ($version, $last_update_token) = @ARGV;
-
-# Uncomment for debugging
-# print STDERR "$0 $version $last_update_token\n";
-
-# Check the hook interface version
-if ($version ne 2) {
-	die "Unsupported query-fsmonitor hook version '$version'.\n" .
-	    "Falling back to scanning...\n";
-}
-
-my $git_work_tree = get_working_dir();
-
-my $json_pkg;
-eval {
-	require JSON::XS;
-	$json_pkg = "JSON::XS";
-	1;
-} or do {
-	require JSON::PP;
-	$json_pkg = "JSON::PP";
-};
-
-launch_watchman();
-
-sub launch_watchman {
-	my $o = watchman_query();
-	if (is_work_tree_watched($o)) {
-		output_result($o->{clock}, @{$o->{files}});
-	}
-}
-
-sub output_result {
-	my ($clockid, @files) = @_;
-
-	# Uncomment for debugging watchman output
-	# open (my $fh, ">", ".git/watchman-output.out");
-	# binmode $fh, ":utf8";
-	# print $fh "$clockid\n@files\n";
-	# close $fh;
-
-	binmode STDOUT, ":utf8";
-	print $clockid;
-	print "\0";
-	local $, = "\0";
-	print @files;
-}
-
-sub watchman_clock {
-	my $response = qx/watchman clock "$git_work_tree"/;
-	die "Failed to get clock id on '$git_work_tree'.\n" .
-		"Falling back to scanning...\n" if $? != 0;
-
-	return $json_pkg->new->utf8->decode($response);
-}
-
-sub watchman_query {
-	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
-	or die "open2() failed: $!\n" .
-	"Falling back to scanning...\n";
-
-	# In the query expression below we're asking for names of files that
-	# changed since $last_update_token but not from the .git folder.
-	#
-	# To accomplish this, we're using the "since" generator to use the
-	# recency index to select candidate nodes and "fields" to limit the
-	# output to file names only. Then we're using the "expression" term to
-	# further constrain the results.
-	my $last_update_line = "";
-	if (substr($last_update_token, 0, 1) eq "c") {
-		$last_update_token = "\"$last_update_token\"";
-		$last_update_line = qq[\n"since": $last_update_token,];
-	}
-	my $query = <<"	END";
-		["query", "$git_work_tree", {$last_update_line
-			"fields": ["name"],
-			"expression": ["not", ["dirname", ".git"]]
-		}]
-	END
-
-	# Uncomment for debugging the watchman query
-	# open (my $fh, ">", ".git/watchman-query.json");
-	# print $fh $query;
-	# close $fh;
-
-	print CHLD_IN $query;
-	close CHLD_IN;
-	my $response = do {local $/; <CHLD_OUT>};
-
-	# Uncomment for debugging the watch response
-	# open ($fh, ">", ".git/watchman-response.json");
-	# print $fh $response;
-	# close $fh;
-
-	die "Watchman: command returned no output.\n" .
-	"Falling back to scanning...\n" if $response eq "";
-	die "Watchman: command returned invalid output: $response\n" .
-	"Falling back to scanning...\n" unless $response =~ /^\{/;
-
-	return $json_pkg->new->utf8->decode($response);
-}
-
-sub is_work_tree_watched {
-	my ($output) = @_;
-	my $error = $output->{error};
-	if ($error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
-		my $response = qx/watchman watch "$git_work_tree"/;
-		die "Failed to make watchman watch '$git_work_tree'.\n" .
-		    "Falling back to scanning...\n" if $? != 0;
-		$output = $json_pkg->new->utf8->decode($response);
-		$error = $output->{error};
-		die "Watchman: $error.\n" .
-		"Falling back to scanning...\n" if $error;
-
-		# Uncomment for debugging watchman output
-		# open (my $fh, ">", ".git/watchman-output.out");
-		# close $fh;
-
-		# Watchman will always return all files on the first query so
-		# return the fast "everything is dirty" flag to git and do the
-		# Watchman query just to get it over with now so we won't pay
-		# the cost in git to look up each individual file.
-		my $o = watchman_clock();
-		$error = $o->{error};
-
-		die "Watchman: $error.\n" .
-		"Falling back to scanning...\n" if $error;
-
-		output_result($o->{clock}, ("/"));
-		return 0;
-	}
-
-	die "Watchman: $error.\n" .
-	"Falling back to scanning...\n" if $error;
-
-	return 1;
-}
-
-sub get_working_dir {
-	my $working_dir;
-	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
-		$working_dir = Win32::GetCwd();
-		$working_dir =~ tr/\\/\//;
-	} else {
-		require Cwd;
-		$working_dir = Cwd::cwd();
-	}
-
-	return $working_dir;
-}
-#!/bin/sh
-#
-# An example hook script to verify what is about to be committed.
-# Called by "git commit" with no arguments.  The hook should
-# exit with non-zero status after issuing an appropriate message if
-# it wants to stop the commit.
-#
-# To enable this hook, rename this file to "pre-commit".
-
-if git rev-parse --verify HEAD >/dev/null 2>&1
-then
-	against=HEAD
-else
-	# Initial commit: diff against an empty tree object
-	against=$(git hash-object -t tree /dev/null)
-fi
-
-# If you want to allow non-ASCII filenames set this variable to true.
-allownonascii=$(git config --type=bool hooks.allownonascii)
-
-# Redirect output to stderr.
-exec 1>&2
-
-# Cross platform projects tend to avoid non-ASCII filenames; prevent
-# them from being added to the repository. We exploit the fact that the
-# printable range starts at the space character and ends with tilde.
-if [ "$allownonascii" != "true" ] &&
-	# Note that the use of brackets around a tr range is ok here, (it's
-	# even required, for portability to Solaris 10's /usr/bin/tr), since
-	# the square bracket bytes happen to fall in the designated range.
-	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
-	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
-then
-	cat <<\EOF
-Error: Attempt to add a non-ASCII file name.
-
-This can cause problems if you want to work with people on other platforms.
-
-To be portable it is advisable to rename the file.
-
-If you know what you are doing you can disable this check using:
-
-  git config hooks.allownonascii true
-EOF
-	exit 1
-fi
-
-# If there are whitespace errors, print the offending file names and fail.
-exec git diff-index --check --cached $against --
-#!/bin/sh
-#
-# An example hook script to check the commit log message.
-# Called by "git commit" with one argument, the name of the file
-# that has the commit message.  The hook should exit with non-zero
-# status after issuing an appropriate message if it wants to stop the
-# commit.  The hook is allowed to edit the commit message file.
-#
-# To enable this hook, rename this file to "commit-msg".
-
-# Uncomment the below to add a Signed-off-by line to the message.
-# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
-# hook is more suited to it.
-#
-# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
-# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
-
-# This example catches duplicate Signed-off-by lines and messages that
-# would confuse 'git am'.
-
-ret=0
-
-test "" = "$(grep '^Signed-off-by: ' "$1" |
-	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
-	echo >&2 Duplicate Signed-off-by lines.
-	ret=1
-}
-
-comment_re="$(
-	{
-		git config --get-regexp "^core\.comment(char|string)\$" ||
-			echo '#'
-	} | sed -n -e '
-		${
-			s/^[^ ]* //
-			s|[][*./\]|\\&|g
-			s/^auto$/[#;@!$%^&|:]/
-			p
-		}'
-)"
-scissors_line="^${comment_re} -\{8,\} >8 -\{8,\}\$"
-comment_line="^${comment_re}.*"
-blank_line='^[ 	]*$'
-# Disallow lines starting with "diff -" or "Index: " in the body of the
-# message. Stop looking if we see a scissors line.
-line="$(sed -n -e "
-	# Skip comments and blank lines at the start of the file.
-	/${scissors_line}/q
-	/${comment_line}/d
-	/${blank_line}/d
-	# The first paragraph will become the subject header so
-	# does not need to be checked.
-	: subject
-	n
-	/${scissors_line}/q
-	/${blank_line}/!b subject
-	# Check the body of the message for problematic
-	# prefixes.
-	: body
-	n
-	/${scissors_line}/q
-	/${comment_line}/b body
-	/^diff -/{p;q;}
-	/^Index: /{p;q;}
-	b body
-	" "$1")"
-if test -n "$line"
-then
-	echo >&2 "Message contains a diff that will confuse 'git am'."
-	echo >&2 "To fix this indent the diff."
-	ret=1
-fi
-
-exit $ret
-#!/bin/sh
-#
-# An example hook script to check the commit log message taken by
-# applypatch from an e-mail message.
-#
-# The hook should exit with non-zero status after issuing an
-# appropriate message if it wants to stop the commit.  The hook is
-# allowed to edit the commit message file.
-#
-# To enable this hook, rename this file to "applypatch-msg".
-
-. git-sh-setup
-commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
-test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
-:
-#!/bin/sh
-
-# An example hook script to validate a patch (and/or patch series) before
-# sending it via email.
-#
-# The hook should exit with non-zero status after issuing an appropriate
-# message if it wants to prevent the email(s) from being sent.
-#
-# To enable this hook, rename this file to "sendemail-validate".
-#
-# By default, it will only check that the patch(es) can be applied on top of
-# the default upstream branch without conflicts in a secondary worktree. After
-# validation (successful or not) of the last patch of a series, the worktree
-# will be deleted.
-#
-# The following config variables can be set to change the default remote and
-# remote ref that are used to apply the patches against:
-#
-#   sendemail.validateRemote (default: origin)
-#   sendemail.validateRemoteRef (default: HEAD)
-#
-# Replace the TODO placeholders with appropriate checks according to your
-# needs.
-
-validate_cover_letter () {
-	file="$1"
-	# TODO: Replace with appropriate checks (e.g. spell checking).
-	true
-}
-
-validate_patch () {
-	file="$1"
-	# Ensure that the patch applies without conflicts.
-	git am -3 "$file" || return
-	# TODO: Replace with appropriate checks for this patch
-	# (e.g. checkpatch.pl).
-	true
-}
-
-validate_series () {
-	# TODO: Replace with appropriate checks for the whole series
-	# (e.g. quick build, coding style checks, etc.).
-	true
-}
-
-# main -------------------------------------------------------------------------
-
-if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
-then
-	remote=$(git config --default origin --get sendemail.validateRemote) &&
-	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
-	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
-	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
-	git config --replace-all sendemail.validateWorktree "$worktree"
-else
-	worktree=$(git config --get sendemail.validateWorktree)
-fi || {
-	echo "sendemail-validate: error: failed to prepare worktree" >&2
-	exit 1
-}
-
-unset GIT_DIR GIT_WORK_TREE
-cd "$worktree" &&
-
-if grep -q "^diff --git " "$1"
-then
-	validate_patch "$1"
-else
-	validate_cover_letter "$1"
-fi &&
-
-if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
-then
-	git config --unset-all sendemail.validateWorktree &&
-	trap 'git worktree remove -ff "$worktree"' EXIT &&
-	validate_series
-fi
-#!/bin/sh
-
-# An example hook script to update a checked-out tree on a git push.
-#
-# This hook is invoked by git-receive-pack(1) when it reacts to git
-# push and updates reference(s) in its repository, and when the push
-# tries to update the branch that is currently checked out and the
-# receive.denyCurrentBranch configuration variable is set to
-# updateInstead.
-#
-# By default, such a push is refused if the working tree and the index
-# of the remote repository has any difference from the currently
-# checked out commit; when both the working tree and the index match
-# the current commit, they are updated to match the newly pushed tip
-# of the branch. This hook is to be used to override the default
-# behaviour; however the code below reimplements the default behaviour
-# as a starting point for convenient modification.
-#
-# The hook receives the commit with which the tip of the current
-# branch is going to be updated:
-commit=$1
-
-# It can exit with a non-zero status to refuse the push (when it does
-# so, it must not modify the index or the working tree).
-die () {
-	echo >&2 "$*"
-	exit 1
-}
-
-# Or it can make any necessary changes to the working tree and to the
-# index to bring them to the desired state when the tip of the current
-# branch is updated to the new commit, and exit with a zero status.
-#
-# For example, the hook can simply run git read-tree -u -m HEAD "$1"
-# in order to emulate git fetch that is run in the reverse direction
-# with git push, as the two-tree form of git read-tree -u -m is
-# essentially the same as git switch or git checkout that switches
-# branches while keeping the local changes in the working tree that do
-# not interfere with the difference between the branches.
-
-# The below is a more-or-less exact translation to shell of the C code
-# for the default behaviour for git's push-to-checkout hook defined in
-# the push_to_deploy() function in builtin/receive-pack.c.
-#
-# Note that the hook will be executed from the repository directory,
-# not from the working tree, so if you want to perform operations on
-# the working tree, you will have to adapt your code accordingly, e.g.
-# by adding "cd .." or using relative paths.
-
-if ! git update-index -q --ignore-submodules --refresh
-then
-	die "Up-to-date check failed"
-fi
-
-if ! git diff-files --quiet --ignore-submodules --
-then
-	die "Working directory has unstaged changes"
-fi
-
-# This is a rough translation of:
-#
-#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
-if git cat-file -e HEAD 2>/dev/null
-then
-	head=HEAD
-else
-	head=$(git hash-object -t tree --stdin </dev/null)
-fi
-
-if ! git diff-index --quiet --cached --ignore-submodules $head --
-then
-	die "Working directory has staged changes"
-fi
-
-if ! git read-tree -u -m "$commit"
-then
-	die "Could not update working tree to new HEAD"
-fi
-#!/bin/sh
-#
-# An example hook script to verify what is about to be committed
-# by applypatch from an e-mail message.
-#
-# The hook should exit with non-zero status after issuing an
-# appropriate message if it wants to stop the commit.
-#
-# To enable this hook, rename this file to "pre-applypatch".
-
-. git-sh-setup
-precommit="$(git rev-parse --git-path hooks/pre-commit)"
-test -x "$precommit" && exec "$precommit" ${1+"$@"}
-:
-[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-[remote "origin"]
-	url = https://github.com/li21rich/wisco_ethercat_ros2_hw.git
-	fetch = +refs/heads/*:refs/remotes/origin/*
-[branch "main"]
-	remote = origin
-	merge = refs/heads/main
-[branch "cb/chained_actuators"]
-	remote = origin
-	merge = refs/heads/cb/chained_actuators
-	vscode-merge-base = origin/main
-ref: refs/heads/cb/chained_actuators
-<?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
-
-  <!-- TODO(Multi-Actuator): Define links and joints for multi-actuator kinematic chain (e.g., shoulder, elbow, wrist) -->
-
-  <ros2_control name="EtherCATSystem" type="system">
-    <hardware>
-      <plugin>ethercat_driver/EthercatDriver</plugin>
-      <param name="master_id">0</param>
-      <!-- TODO(Multi-Actuator): Update EtherCAT loop rate and interface configurations -->
-    </hardware>
-
-    <!-- TODO(Multi-Actuator): Add joint hardware definitions and EtherCAT slave indices (0, 1, 2) for each daisy-chained actuator -->
-    <joint name="joint_1">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 1 (Slave Index 0) -->
-    </joint>
-
-    <joint name="joint_2">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 2 (Slave Index 1) -->
-    </joint>
-
-    <joint name="joint_3">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 3 (Slave Index 2) -->
-    </joint>
-
-  </ros2_control>
-
-</robot>vendor_id: 0x00202008
-product_id: 0x00000000
-sdo:
-  - {index: 0x6060, sub_index: 0, type: int8, value: 10}
-sm:
-  - {index: 2, type: output, pdo: rpdo}
-  - {index: 3, type: input, pdo: tpdo}
-rpdo:
-  - index: 0x1600
-    channels:
-      - {index: 0x6040, sub_index: 0, type: uint16, default: 0}
-      - {index: 0x607a, sub_index: 0, type: int32, default: 0} # No command interface
-      - {index: 0x60ff, sub_index: 0, type: int32, default: 0} # No command interface
-      - {index: 0x6071, sub_index: 0, type: int16, command_interface: effort, factor: 66.667, default: 0}
-      - {index: 0x6072, sub_index: 0, type: int16, default: 1000}
-      - {index: 0x6060, sub_index: 0, type: int8, command_interface: mode_of_operation, default: 10}
-      - {index: 0x2ffd, sub_index: 0, type: uint8, default: 0}
-
-tpdo:
-  - index: 0x1a00
-    channels:
-      - {index: 0x6041, sub_index: 0, type: uint16}
-      - {index: 0x6064, sub_index: 0, type: int32, state_interface: position, factor: 0.0000479369}
-      - {index: 0x606c, sub_index: 0, type: int32, state_interface: velocity, factor: 0.0000479369}
-      - {index: 0x6077, sub_index: 0, type: int16, state_interface: effort, factor: 0.015}
-      - {index: 0x603f, sub_index: 0, type: uint16}
-      - {index: 0x6061, sub_index: 0, type: int8, state_interface: mode_of_operation} # Added to read live state
-      - {index: 0x2ffe, sub_index: 0, type: uint8}
-controller_manager:
-  ros__parameters:
-    update_rate: 100  # TODO(Multi-Actuator): Scale up to 1000Hz when real-time kernel (PREEMPT_RT) is configured
-
-    # TODO(Multi-Actuator): Ensure joint_state_broadcaster publishes state array for all connected drives
-    joint_state_broadcaster:
-      type: joint_state_broadcaster/JointStateBroadcaster
-
-    # TODO(Multi-Actuator): Configure multi-axis effort controller to accept vector-based commands
-    effort_controller:
-      type: effort_controllers/JointGroupEffortController
-
-effort_controller:
-  ros__parameters:
-    # TODO(Multi-Actuator): Define joint names corresponding to multi-actuator kinematic chain (e.g., shoulder, elbow, wrist)
-    joints:
-      - joint_1
-      - joint_2
-      - joint_3
