@@ -10,9 +10,6 @@ def generate_launch_description():
     urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
     robot_desc = ParameterValue(Command(['xacro ', urdf_file]), value_type=str)
 
-    for param, value in multi_drive_params.items():
-        robot_desc += f'\n<param name="{param}" value="{value}"/>'
-
     return LaunchDescription([
         Node(
             package='controller_manager',
