@@ -1,7 +1,51 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
 
-  <!-- TODO(Multi-Actuator): Define links and joints for multi-actuator kinematic chain (e.g., shoulder, elbow, wrist) -->
+  <!-- Links -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.2 0.2 0.1"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="upper_arm_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.3" radius="0.05"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.0 0.0 1.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="forearm_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.25" radius="0.04"/>
+      </geometry>
+      <material name="green">
+        <color rgba="0.0 1.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <link name="hand_link">
+    <visual>
+      <geometry>
+        <box size="0.1 0.1 0.05"/>
+      </geometry>
+      <material name="red">
+        <color rgba="1.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
   <joint name="shoulder_joint" type="revolute">
     <parent link="base_link"/>
     <child link="upper_arm_link"/>
@@ -26,133 +70,53 @@
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
 
-  link name="base_link">
-    <visual>
-      <geometry>
-        <box size="0.2 0.2 0.1"/>
-      </geometry>
-      <material name="gray">
-        <color rgba="0.5 0.5 0.5 1.0"/>
-      </material>
-    </visual>
-  </link>
-
-  link name="upper_arm_link">
-    <visual>
-      <geometry>
-        <cylinder length="0.3" radius="0.05"/>
-      </geometry>
-      <material name="blue">
-        <color rgba="0.0 0.0 1.0 1.0"/>
-      </material>
-    </visual>
-  </link>
-
-  link name="forearm_link">
-    <visual>
-      <geometry>
-        <cylinder length="0.25" radius="0.04"/>
-      </geometry>
-      <material name="green">
-        <color rgba="0.0 1.0 0.0 1.0"/>
-      </material>
-    </visual>
-  </link>
-
-  link name="hand_link">
-    <visual>
-      <geometry>
-        <box size="0.1 0.1 0.05"/>
-      </geometry>
-      <material name="red">
-        <color rgba="1.0 0.0 0.0 1.0"/>
-      </material>
-    </visual>
-  </link>
-
   <ros2_control name="EtherCATSystem" type="system">
     <hardware>
       <plugin>ethercat_driver/EthercatDriver</plugin>
       <param name="master_id">0</param>
-      <!-- TODO(Multi-Actuator): Update EtherCAT loop rate and interface configurations -->
       <param name="loop_rate">1000</param>
       <param name="interface_type">EtherCAT</param>
       <param name="pdo_mapping">true</param>
       <param name="slave_count">3</param>
     </hardware>
 
-    <!-- TODO(Multi-Actuator): Add joint hardware definitions and EtherCAT slave indices (0, 1, 2) for each daisy-chained actuator -->
-    <joint name="joint_1">
+    <joint name="shoulder_joint">
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
       <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 1 (Slave Index 0) -->
-      <ros2_control name="joint_1_controller" type="effort_controller/JointEffortController">
-        <param name="joint">joint_1</param>
-        <param name="command_topic">/joint_1/command</param>
-      </ros2_control>
-      <ros2_control name="joint_1_state_broadcaster" type="joint_state_broadcaster/JointStateBroadcaster">
-        <param name="joint">joint_1</param>
-        <param name="state_topic">/joint_1/state</param>
-      </ros2_control>
-      <ros2_control name="joint_1_safety_monitor" type="safety_monitor/SafetyMonitor">
-        <param name="joint">joint_1</param>
-        <param name="effort_limit">5.0</param>
-        <param name="velocity_limit">1.0</param>
-      </ros2_control> 
-      <ros2_control name="joint_1_telemetry" type="telemetry/JointTelemetry">
-        <param name="joint">joint_1</param>
-        <param name="telemetry_topic">/joint_1/telemetry</param>
-      </ros2_control>
+      <ec_module name="shoulder_actuator">
+        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
+        <param name="alias">0</param>
+        <param name="position">0</param>
+        <param name="slave_id">0</param>
+      </ec_module>
     </joint>
 
-    <joint name="joint_2">
+    <joint name="elbow_joint">
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
       <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 2 (Slave Index 1) -->
-              <param name="joint">joint_2</param>
-        <param name="command_topic">/joint_2/command</param>
-      </ros2_control>
-      <ros2_control name="joint_2_state_broadcaster" type="joint_state_broadcaster/JointStateBroadcaster">
-        <param name="joint">joint_2</param>
-        <param name="state_topic">/joint_2/state</param>
-      </ros2_control>
-      <ros2_control name="joint_2_safety_monitor" type="safety_monitor/SafetyMonitor">
-        <param name="joint">joint_2</param>
-        <param name="effort_limit">5.0</param>
-        <param name="velocity_limit">1.0</param>
-      </ros2_control> 
-      <ros2_control name="joint_2_telemetry" type="telemetry/JointTelemetry">
-        <param name="joint">joint_2</param>
-        <param name="telemetry_topic">/joint_2/telemetry</param>
-      </ros2_control>
+      <ec_module name="elbow_actuator">
+        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
+        <param name="alias">0</param>
+        <param name="position">1</param>
+        <param name="slave_id">1</param>
+      </ec_module>
     </joint>
 
-    <joint name="joint_3">
+    <joint name="wrist_joint">
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
       <command_interface name="effort"/>
-      <!-- TODO(Multi-Actuator): Map PDO parameters for Actuator 3 (Slave Index 2) -->
-      <param name="joint">joint_3</param>
-        <param name="command_topic">/joint_3/command</param>
-      </ros2_control>
-      <ros2_control name="joint_3_state_broadcaster" type="joint_state_broadcaster/JointStateBroadcaster">
-        <param name="joint">joint_3</param>
-        <param name="state_topic">/joint_3/state</param>
-      </ros2_control>
-      <ros2_control name="joint_3_safety_monitor" type="safety_monitor/SafetyMonitor">
-        <param name="joint">joint_3</param>
-        <param name="effort_limit">5.0</param>
-        <param name="velocity_limit">1.0</param>
-      </ros2_control> 
-      <ros2_control name="joint_3_telemetry" type="telemetry/JointTelemetry">
-        <param name="joint">joint_3</param>
-        <param name="telemetry_topic">/joint_3/telemetry</param>
-      </ros2_control>
+      <ec_module name="wrist_actuator">
+        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
+        <param name="alias">0</param>
+        <param name="position">2</param>
+        <param name="slave_id">2</param>
+      </ec_module>
     </joint>
 
   </ros2_control>
