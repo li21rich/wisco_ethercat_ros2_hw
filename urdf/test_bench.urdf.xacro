@@ -5,13 +5,11 @@
   <material name="shell_dark"><color rgba="0.45 0.48 0.52 1.0"/></material>
   <material name="arm_dark"><color rgba="0.22 0.24 0.27 1.0"/></material>
   <material name="accent_red"><color rgba="0.7 0.12 0.25 1.0"/></material>
-  <material name="trim_black"><color rgba="0.35 0.35 0.37 1.0"/></material>
 
   <!--
     Color scheme:
       - shell_dark : gray body shell
       - arm_dark   : dark gray structure, arm segments, eyes, static right arm
-      - trim_black : faceplate
       - accent_red : ONLY the 3 actuators (shoulder, elbow, wrist)
 
     Many viewers apply ONE material per link, so each color group is its own
@@ -101,119 +99,119 @@
     <visual>
       <origin xyz="0.085 0 1.17" rpy="0 0 0"/>
       <geometry><box size="0.015 0.26 0.14"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0.085 0 0.96" rpy="0 0 0"/>
       <geometry><box size="0.015 0.26 0.26"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Eyes -->
     <visual>
       <origin xyz="0.086 0.055 1.43" rpy="0 1.5708 0"/>
       <geometry><cylinder radius="0.016" length="0.01"/></geometry>
-      <material name="arm_dark"/>
+      <material name="accent_red"/>
     </visual>
     <visual>
       <origin xyz="0.086 -0.055 1.43" rpy="0 1.5708 0"/>
       <geometry><cylinder radius="0.016" length="0.01"/></geometry>
-      <material name="arm_dark"/>
+      <material name="accent_red"/>
     </visual>
     <!-- Static shoulder hubs -->
     <visual>
       <origin xyz="0 0.18 1.20" rpy="1.5708 0 0"/>
       <geometry><cylinder radius="0.055" length="0.08"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.18 1.20" rpy="1.5708 0 0"/>
       <geometry><cylinder radius="0.055" length="0.08"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Pelvis block -->
     <visual>
       <origin xyz="0 0 0.66" rpy="0 0 0"/>
       <geometry><box size="0.14 0.24 0.10"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Static knee cylinders -->
     <visual>
       <origin xyz="0 0.11 0.31" rpy="1.5708 0 0"/>
       <geometry><cylinder radius="0.05" length="0.095"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.11 0.31" rpy="1.5708 0 0"/>
       <geometry><cylinder radius="0.05" length="0.095"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Shin pins -->
     <visual>
       <origin xyz="0.045 0.11 0.15" rpy="0 0 0"/>
       <geometry><cylinder radius="0.008" length="0.18"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0.045 -0.11 0.15" rpy="0 0 0"/>
       <geometry><cylinder radius="0.008" length="0.18"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Feet -->
     <visual>
       <origin xyz="0.02 0.11 0.02" rpy="0 0 0"/>
       <geometry><box size="0.18 0.11 0.035"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0.02 -0.11 0.02" rpy="0 0 0"/>
       <geometry><box size="0.18 0.11 0.035"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <!-- Static right arm (all dark, no actuators) -->
     <visual>
       <origin xyz="0 -0.26 1.20" rpy="0 0 0"/>
       <geometry><sphere radius="0.062"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 1.15" rpy="0 0 0"/>
       <geometry><cylinder radius="0.058" length="0.08"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 1.06" rpy="0 0 0"/>
       <geometry><cylinder radius="0.045" length="0.10"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.96" rpy="0 0 0"/>
       <geometry><cylinder radius="0.056" length="0.11"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.90" rpy="1.5708 0 0"/>
       <geometry><cylinder radius="0.046" length="0.08"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.79" rpy="0 0 0"/>
       <geometry><box size="0.065 0.06 0.16"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.79" rpy="0 0 0"/>
       <geometry><box size="0.069 0.064 0.02"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.69" rpy="0 0 0"/>
       <geometry><cylinder radius="0.038" length="0.07"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
     <visual>
       <origin xyz="0 -0.26 0.60" rpy="0 0 0"/>
       <geometry><box size="0.06 0.04 0.10"/></geometry>
-      <material name="arm_dark"/>
+      <material name="shell_dark"/>
     </visual>
   </link>
 
@@ -223,7 +221,7 @@
     <visual>
       <origin xyz="0.082 0 1.43" rpy="0 0 0"/>
       <geometry><box size="0.005 0.17 0.075"/></geometry>
-      <material name="trim_black"/>
+      <material name="shell_dark"/>
     </visual>
   </link>
 
