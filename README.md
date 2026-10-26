@@ -2,7 +2,7 @@
 
 Demo: https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view?usp=sharing
 
-This repository contains the physical hardware configuration, PDO mapping, demo script, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents serve as a test demo that proves you can run a single servo with ROS 2 Jazzy and ethercat_driver_ros2 on a Linux laptop (replace with RK3588 in final implementation). Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
+This repository contains the physical hardware configuration, PDO mapping, demo script, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents serve as a test demo that proves you can run single or multiple servos with ROS 2 Jazzy and ethercat_driver_ros2 on a Linux laptop (replace with RK3588 in final implementation). Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
 
 RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
 
