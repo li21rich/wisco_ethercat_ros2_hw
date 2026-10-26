@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import rclpy
+import math
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import JointState
@@ -17,20 +18,18 @@ class MultiActuatorTorqueController(Node):
         self.topic_names = self.get_parameter('topic_names').get_parameter_value().string_array_value
         self.torque_limit = self.get_parameter('torque_limit').get_parameter_value().double_value
 
-        self.target_vel = 1.0  # rad/s
+        self.start_time = self.get_clock().now()
         
-        # --- SOFT TUNING FOR UNLOADED ACTUATORS; CHANGE THESE BASED ON YOUR MOTOR CHARACTERIZATION ---
         self.k_ff = {
-            'shoulder_joint': 1, # first in daisy chain
+            'shoulder_joint': 1, 
             'elbow_joint': 0.9,    
-            'wrist_joint': 1.4     
+            'wrist_joint': 1.3     
         }
         self.kp = 0.12
-        self.ki = 0.12    
-        self.max_i_term = 0.2
+        self.ki = 0.12   
+        self.max_i_term = 0.177
         
         self.vel_alpha = 1.0
-        ## -------------------------------------------------------
         
         self.integral_error = {joint: 0.0 for joint in self.joint_names}
         self.current_cmd = {joint: 0.0 for joint in self.joint_names}
@@ -49,6 +48,7 @@ class MultiActuatorTorqueController(Node):
 
     def joint_state_callback(self, msg: JointState):
         now = self.get_clock().now()
+        t = (now - self.start_time).nanoseconds / 1e9
         
         msg_time = rclpy.time.Time.from_msg(msg.header.stamp)
         if self.last_msg_time is None:
@@ -72,14 +72,25 @@ class MultiActuatorTorqueController(Node):
 
         cmd_msg = Float64MultiArray()
         cmd_array = []
+        
+        # Phase-shifted target velocities for a biological wave motion
+        # INCREASE speed_factor for faster oscillation
+        # DECREASE amplitude for less range of motion
+        speed_factor = 3
+        amplitude = 1
+        
+        target_v_shared = amplitude * math.cos(speed_factor * t)
+        target_vels = {joint: target_v_shared for joint in self.joint_names}
 
         # 2. Compute Control Law (FF + P + Clamped I)
         for joint in self.joint_names:
             current_vel = self.latest_states[joint]['velocity']
-            error = self.target_vel - current_vel
-            # Feedforward term using per-joint baseline
-            joint_ff = self.k_ff[joint]
-            ff_term = joint_ff if self.target_vel > 0.0 else (-joint_ff if self.target_vel < 0.0 else 0.0)
+            target_v = target_vels[joint]
+            error = target_v - current_vel
+            
+            # Smooth Feedforward scaling avoids violent torque snaps at zero-crossings
+            ff_term = self.k_ff[joint] * target_v
+            
             # Proportional term
             p_term = self.kp * error
             
@@ -100,16 +111,17 @@ class MultiActuatorTorqueController(Node):
         for pub in self.cmd_pubs:
             pub.publish(cmd_msg)
 
-        # 4. Diagnostic Logging (Includes actual effort feedback from 0x6077)
+        # 4. Diagnostic Logging
         if (now - self.last_print_time).nanoseconds / 1e9 >= 1.0:
             self.last_print_time = now
-            log_lines = ["\n=== FF + PI Velocity Tracking ==="]
+            log_lines = ["\n"]
             for joint in self.joint_names:
                 vel = self.latest_states[joint]['velocity']
                 eff = self.latest_states[joint]['effort']
                 cmd = self.current_cmd[joint]
+                target = target_vels[joint]
                 log_lines.append(
-                    f"  [{joint:14s}] Cmd: {cmd:+.3f} N·m | Act Eff: {eff:+.3f} N·m | Vel: {vel:+.3f} rad/s"
+                    f"[{joint:14s}]Tgt Vel: {target:+.2f}, Act Vel: {vel:+.2f}, Cmd Eff: {cmd:+.3f} N·m"
                 )
             self.get_logger().info("\n".join(log_lines))
 

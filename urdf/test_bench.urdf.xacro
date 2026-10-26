@@ -1,79 +1,366 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
 
-  <!-- Links -->
+  <!-- ==================== MATERIALS ==================== -->
+  <material name="shell_dark"><color rgba="0.45 0.48 0.52 1.0"/></material>
+  <material name="arm_dark"><color rgba="0.22 0.24 0.27 1.0"/></material>
+  <material name="accent_red"><color rgba="0.7 0.12 0.25 1.0"/></material>
+  <material name="trim_black"><color rgba="0.35 0.35 0.37 1.0"/></material>
+
+  <!--
+    Color scheme:
+      - shell_dark : gray body shell
+      - arm_dark   : dark gray structure, arm segments, eyes, static right arm
+      - trim_black : faceplate
+      - accent_red : ONLY the 3 actuators (shoulder, elbow, wrist)
+
+    Many viewers apply ONE material per link, so each color group is its own
+    link, attached to its parent with a fixed joint at identity.
+  -->
+
+  <!-- ==================== STATIC BODY: SHELL (GRAY) ==================== -->
   <link name="base_link">
+    <!-- Main torso -->
+    <visual>
+      <origin xyz="0 0 1.05" rpy="0 0 0"/>
+      <geometry><box size="0.16 0.28 0.42"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Upper torso cap -->
+    <visual>
+      <origin xyz="0 0 1.26" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.08" length="0.28"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Neck -->
+    <visual>
+      <origin xyz="0 0 1.35" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.08"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Head housing -->
+    <visual>
+      <origin xyz="0.02 0 1.43" rpy="0 0 0"/>
+      <geometry><box size="0.12 0.18 0.10"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.02 0.09 1.43" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.05" length="0.12"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.02 -0.09 1.43" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.05" length="0.12"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Spine -->
+    <visual>
+      <origin xyz="0 0 0.77" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.14"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Hip brackets -->
+    <visual>
+      <origin xyz="0 0.11 0.60" rpy="0 0 0"/>
+      <geometry><box size="0.11 0.09 0.12"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.11 0.60" rpy="0 0 0"/>
+      <geometry><box size="0.11 0.09 0.12"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Upper thighs -->
+    <visual>
+      <origin xyz="0 0.11 0.44" rpy="0 0 0"/>
+      <geometry><box size="0.09 0.085 0.20"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.11 0.44" rpy="0 0 0"/>
+      <geometry><box size="0.09 0.085 0.20"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <!-- Shins -->
+    <visual>
+      <origin xyz="0 0.11 0.17" rpy="0 0 0"/>
+      <geometry><box size="0.075 0.075 0.22"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.11 0.17" rpy="0 0 0"/>
+      <geometry><box size="0.075 0.075 0.22"/></geometry>
+      <material name="shell_dark"/>
+    </visual>
+  </link>
+
+  <!-- ==================== STATIC BODY: DARK PARTS ==================== -->
+  <link name="base_dark_link">
+    <!-- Front chest plates -->
+    <visual>
+      <origin xyz="0.085 0 1.17" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.26 0.14"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.085 0 0.96" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.26 0.26"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Eyes -->
+    <visual>
+      <origin xyz="0.086 0.055 1.43" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.016" length="0.01"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.086 -0.055 1.43" rpy="0 1.5708 0"/>
+      <geometry><cylinder radius="0.016" length="0.01"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Static shoulder hubs -->
+    <visual>
+      <origin xyz="0 0.18 1.20" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.08"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.18 1.20" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.055" length="0.08"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Pelvis block -->
+    <visual>
+      <origin xyz="0 0 0.66" rpy="0 0 0"/>
+      <geometry><box size="0.14 0.24 0.10"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Static knee cylinders -->
+    <visual>
+      <origin xyz="0 0.11 0.31" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.095"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.11 0.31" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.05" length="0.095"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Shin pins -->
+    <visual>
+      <origin xyz="0.045 0.11 0.15" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.008" length="0.18"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.045 -0.11 0.15" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.008" length="0.18"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Feet -->
+    <visual>
+      <origin xyz="0.02 0.11 0.02" rpy="0 0 0"/>
+      <geometry><box size="0.18 0.11 0.035"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.02 -0.11 0.02" rpy="0 0 0"/>
+      <geometry><box size="0.18 0.11 0.035"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <!-- Static right arm (all dark, no actuators) -->
+    <visual>
+      <origin xyz="0 -0.26 1.20" rpy="0 0 0"/>
+      <geometry><sphere radius="0.062"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 1.15" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.058" length="0.08"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 1.06" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.10"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.96" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.056" length="0.11"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.90" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.046" length="0.08"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.79" rpy="0 0 0"/>
+      <geometry><box size="0.065 0.06 0.16"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.79" rpy="0 0 0"/>
+      <geometry><box size="0.069 0.064 0.02"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.69" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.07"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.26 0.60" rpy="0 0 0"/>
+      <geometry><box size="0.06 0.04 0.10"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+  </link>
+
+  <!-- ==================== STATIC BODY: TRIM ==================== -->
+  <link name="base_black_link">
+    <!-- Faceplate -->
+    <visual>
+      <origin xyz="0.082 0 1.43" rpy="0 0 0"/>
+      <geometry><box size="0.005 0.17 0.075"/></geometry>
+      <material name="trim_black"/>
+    </visual>
+  </link>
+
+  <!-- Fixed joints for static color groups -->
+  <joint name="base_dark_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_dark_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="base_black_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_black_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================== ACTIVE LEFT ARM ==================== -->
+  <!-- shoulder_joint has rpy="3.14159 0 0", so +Z in these links points DOWNWARD -->
+
+  <!-- Upper arm: dark visuals + all collisions -->
+  <link name="upper_arm_link">
     <visual>
       <origin xyz="0 0 0.05" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.2 0.2 0.1"/>
-      </geometry>
-      <material name="gray">
-        <color rgba="0.5 0.5 0.5 1.0"/>
-      </material>
+      <geometry><cylinder radius="0.058" length="0.08"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.14" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.10"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.24" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.056" length="0.11"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.062"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.058" length="0.08"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.14" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.10"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.24" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.056" length="0.11"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ACTUATOR 1 (RED): shoulder, sits at the shoulder_joint origin -->
+  <link name="shoulder_actuator_link">
+    <visual>
+      <origin xyz="0 0 0.0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.062"/></geometry>
+      <material name="accent_red"/>
     </visual>
   </link>
 
-  <link name="upper_arm_link">
-    <!-- Main Arm Cylinder -->
-    <visual>
-      <origin xyz="0 0 0.15" rpy="0 0 0"/>
-      <geometry>
-        <cylinder length="0.3" radius="0.05"/>
-      </geometry>
-      <material name="blue">
-        <color rgba="0.0 0.0 1.0 1.0"/>
-      </material>
-    </visual>
-    <!-- Indicator box to show axial rotation -->
-    <visual>
-      <origin xyz="0.05 0 0.15" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.05 0.02 0.02"/>
-      </geometry>
-      <material name="red">
-        <color rgba="1.0 0.0 0.0 1.0"/>
-      </material>
-    </visual>
-  </link>
-
+  <!-- Forearm: dark visuals + all collisions -->
   <link name="forearm_link">
     <visual>
-      <origin xyz="0 0 0.125" rpy="0 0 0"/>
-      <geometry>
-        <cylinder length="0.25" radius="0.04"/>
-      </geometry>
-      <material name="green">
-        <color rgba="0.0 1.0 0.0 1.0"/>
-      </material>
+      <origin xyz="0 0 0.11" rpy="0 0 0"/>
+      <geometry><box size="0.065 0.06 0.16"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.11" rpy="0 0 0"/>
+      <geometry><box size="0.069 0.064 0.02"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.21" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.07"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.046" length="0.08"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.11" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.16"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.21" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.07"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ACTUATOR 2 (RED): elbow, sits at the elbow_joint origin (axis along Y) -->
+  <link name="elbow_actuator_link">
+    <visual>
+      <origin xyz="0 0 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.046" length="0.08"/></geometry>
+      <material name="accent_red"/>
     </visual>
   </link>
 
+  <!-- Hand (dark) -->
   <link name="hand_link">
     <visual>
-      <origin xyz="0 0 0.025" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.1 0.1 0.05"/>
-      </geometry>
-      <material name="red">
-        <color rgba="1.0 0.0 0.0 1.0"/>
-      </material>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.06 0.04 0.10"/></geometry>
+      <material name="arm_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.06 0.04 0.10"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ACTUATOR 3 (RED): wrist, sits at the wrist_joint origin (axis along Y) -->
+  <link name="wrist_actuator_link">
+    <visual>
+      <origin xyz="0 0 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.07"/></geometry>
+      <material name="accent_red"/>
     </visual>
   </link>
 
-  <!-- Joints -->
+  <!-- ==================== JOINTS ==================== -->
   <joint name="shoulder_joint" type="revolute">
     <parent link="base_link"/>
     <child link="upper_arm_link"/>
-    <origin xyz="0 0 0.1" rpy="0 0 0"/> <!-- Starts at top of base -->
-    <axis xyz="0 0 1"/>
+    <origin xyz="0 0.26 1.20" rpy="3.14159 0 0"/>
+    <axis xyz="0 1 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
 
   <joint name="elbow_joint" type="revolute">
     <parent link="upper_arm_link"/>
     <child link="forearm_link"/>
-    <origin xyz="0 0 0.3" rpy="0 0 0"/> <!-- Starts at end of upper arm -->
+    <origin xyz="0 0 0.3" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
@@ -81,12 +368,29 @@
   <joint name="wrist_joint" type="revolute">
     <parent link="forearm_link"/>
     <child link="hand_link"/>
-    <origin xyz="0 0 0.25" rpy="0 0 0"/> <!-- Starts at end of forearm -->
-    <axis xyz="1 0 0"/>
+    <origin xyz="0 0 0.25" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
 
-  <!-- ros2_control definition remains exactly the same -->
+  <!-- Fixed joints attaching the red actuator links (identity: they move with their parent) -->
+  <joint name="shoulder_actuator_joint" type="fixed">
+    <parent link="upper_arm_link"/>
+    <child link="shoulder_actuator_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="elbow_actuator_joint" type="fixed">
+    <parent link="forearm_link"/>
+    <child link="elbow_actuator_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="wrist_actuator_joint" type="fixed">
+    <parent link="hand_link"/>
+    <child link="wrist_actuator_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================== ROS2_CONTROL ==================== -->
   <ros2_control name="EtherCATSystem" type="system">
     <hardware>
       <plugin>ethercat_driver/EthercatDriver</plugin>

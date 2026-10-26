@@ -92,6 +92,7 @@ Open a second (sourced) terminal while the launch file is running to inspect the
 * **Stream live motor telemetry (pos/vel/effort):** `ros2 topic echo /joint_states`
 * **Command torque manually (for example_torque_command_ros_node.py only):** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
 * **Check domains:** `ethercat domains` (i.e. for 3 actuators it should say "Domain0: LogBaseAddr 0x00000000, Size  96, WorkingCounter 9/9")
+* **Latency analysis:** `ros2 topic hz /joint_states` (publish rate, min/max latency, and standard deviation)
 
 
 ### Standalone Demo Scripts
