@@ -4,6 +4,7 @@
   <!-- Links -->
   <link name="base_link">
     <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
       <geometry>
         <box size="0.2 0.2 0.1"/>
       </geometry>
@@ -14,7 +15,9 @@
   </link>
 
   <link name="upper_arm_link">
+    <!-- Main Arm Cylinder -->
     <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
       <geometry>
         <cylinder length="0.3" radius="0.05"/>
       </geometry>
@@ -22,10 +25,21 @@
         <color rgba="0.0 0.0 1.0 1.0"/>
       </material>
     </visual>
+    <!-- Indicator box to show axial rotation -->
+    <visual>
+      <origin xyz="0.05 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.02 0.02"/>
+      </geometry>
+      <material name="red">
+        <color rgba="1.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
   </link>
 
   <link name="forearm_link">
     <visual>
+      <origin xyz="0 0 0.125" rpy="0 0 0"/>
       <geometry>
         <cylinder length="0.25" radius="0.04"/>
       </geometry>
@@ -37,6 +51,7 @@
 
   <link name="hand_link">
     <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
       <geometry>
         <box size="0.1 0.1 0.05"/>
       </geometry>
@@ -46,10 +61,11 @@
     </visual>
   </link>
 
+  <!-- Joints -->
   <joint name="shoulder_joint" type="revolute">
     <parent link="base_link"/>
     <child link="upper_arm_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/> <!-- Starts at top of base -->
     <axis xyz="0 0 1"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
@@ -57,7 +73,7 @@
   <joint name="elbow_joint" type="revolute">
     <parent link="upper_arm_link"/>
     <child link="forearm_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/> <!-- Starts at end of upper arm -->
     <axis xyz="0 1 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
@@ -65,11 +81,12 @@
   <joint name="wrist_joint" type="revolute">
     <parent link="forearm_link"/>
     <child link="hand_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 0.25" rpy="0 0 0"/> <!-- Starts at end of forearm -->
     <axis xyz="1 0 0"/>
     <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
   </joint>
 
+  <!-- ros2_control definition remains exactly the same -->
   <ros2_control name="EtherCATSystem" type="system">
     <hardware>
       <plugin>ethercat_driver/EthercatDriver</plugin>
@@ -90,6 +107,7 @@
         <param name="alias">0</param>
         <param name="position">0</param>
         <param name="slave_id">0</param>
+        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
       </ec_module>
     </joint>
 
@@ -103,6 +121,7 @@
         <param name="alias">0</param>
         <param name="position">1</param>
         <param name="slave_id">1</param>
+        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
       </ec_module>
     </joint>
 
@@ -116,9 +135,9 @@
         <param name="alias">0</param>
         <param name="position">2</param>
         <param name="slave_id">2</param>
+        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
       </ec_module>
     </joint>
-
   </ros2_control>
 
 </robot>

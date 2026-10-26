@@ -57,17 +57,17 @@ ROS 2 (full) on Jetson Thor
 
 ### Quick Start Workflow
 
-**1. Build**
+
+**1. Source the Environment**
+Run this in any new terminal before executing ROS 2 commands.
+```bash
+source /opt/ros/jazzy/setup.bash && source [DIRECTORY]/wisco_ws/install/setup.bash
+```
+
+**2. Build**
 Run this from the workspace root (`[DIRECTORY]/wisco_ws`) whenever you make changes
 ```bash
 colcon build --symlink-install
-```
-
-**2. Source the Environment**
-Run this in any new terminal before executing ROS 2 commands.
-```bash
-source /opt/ros/jazzy/setup.bash
-source [DIRECTORY]/wisco_ws/install/setup.bash
 ```
 
 **3. Launch**
@@ -88,10 +88,19 @@ rviz2 is recommended to visualize the servo as it runs.
 
 Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
 
-* **List active ROS2 topics:** `ros2 topic list`
+* **List active ROS2 topics:** `ros2 topic list` (some of these you must be sudo)
 * **Stream live motor telemetry (pos/vel/effort):** `ros2 topic echo /joint_states`
-* **Verify hardware loaded:** `ros2 control list_hardware_interfaces`
-* **Verify controllers loaded:** `ros2 control list_controllers`
-* **Command torque manually:** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
+* **Command torque manually (for example_torque_command_ros_node.py only):** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
+* **Check domains:** `ethercat domains` (i.e. for 3 actuators it should say "Domain0: LogBaseAddr 0x00000000, Size  96, WorkingCounter 9/9")
 
 
+### Standalone Demo Scripts
+
+The package includes helper scripts to test actuator response without launching the full stack:
+
+- **`example_torque_command_ros_node.py`**: Tester for one motor
+- **`multiple_act_command.py`**: Tester for three motors
+
+To run an example script manually in a separate terminal:
+```bash
+ros2 run wisco_ethercat_ros2_hw stiction_breaker.py

@@ -35,7 +35,7 @@ def generate_launch_description():
         ),
         Node(
             package='wisco_ethercat_ros2_hw',
-            executable='example_torque_command_ros_node',
+            executable='multi_actuator_torque_controller',
             name='torque_ramper',
             output='screen',
         ),

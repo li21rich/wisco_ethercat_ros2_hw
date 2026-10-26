@@ -29,6 +29,12 @@ install(
 install(
   PROGRAMS scripts/example_torque_command_ros_node.py
   DESTINATION lib/${PROJECT_NAME}
-RENAME example_torque_command_ros_node
+  RENAME example_torque_command_ros_node
+)
+
+install(
+  PROGRAMS scripts/multiple_act_command.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME multi_actuator_torque_controller
 )
 ament_package()
