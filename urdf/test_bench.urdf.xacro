@@ -1,6 +1,50 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
 
+<!-- ==================== SETTINGS AND PART CHOICE ==================== -->
+  <xacro:arg name="actuator_type" default="x4_10"/>   <!-- option one or option two -->
+  <xacro:arg name="num_actuators" default="3"/>        <!-- one through sixteen -->
+
+  <xacro:property name="actuator_type" value="$(arg actuator_type)"/>
+  <xacro:property name="num_actuators" value="$(arg num_actuators)"/>
+
+  <!-- details for each part: strength limit, speed limit, file name -->
+  <xacro:if value="${actuator_type == 'x4_10'}">
+    <xacro:property name="max_effort" value="10.0"/>
+    <xacro:property name="max_velocity" value="24.9"/>
+    <xacro:property name="yaml_filename" value="rmd_x4_10.yaml"/>
+  </xacro:if>
+  <xacro:if value="${actuator_type == 'x4_36'}">
+    <xacro:property name="max_effort" value="34.0"/>
+    <xacro:property name="max_velocity" value="8.7"/>
+    <xacro:property name="yaml_filename" value="rmd_x4_36.yaml"/>
+  </xacro:if>
+  <!-- reminder: add other options here once their strength limits, speed limits, and file details are known. any other choice will cause an error. -->
+
+  <!-- names for up to sixteen parts (the first three keep their starting names) -->
+  <xacro:property name="joint_names" value="${['shoulder_joint', 'elbow_joint', 'wrist_joint', 'joint_4', 'joint_5', 'joint_6', 'joint_7', 'joint_8', 'joint_9', 'joint_10', 'joint_11', 'joint_12', 'joint_13', 'joint_14', 'joint_15', 'joint_16']}"/>
+  <xacro:property name="module_names" value="${['shoulder_actuator', 'elbow_actuator', 'wrist_actuator', 'actuator_4', 'actuator_5', 'actuator_6', 'actuator_7', 'actuator_8', 'actuator_9', 'actuator_10', 'actuator_11', 'actuator_12', 'actuator_13', 'actuator_14', 'actuator_15', 'actuator_16']}"/>
+
+  <!-- connection and communication part for each item starting from one; repeats until all items are finished -->
+  <xacro:macro name="actuator_joint" params="idx n">
+    <xacro:if value="${idx &lt;= n}">
+    <joint name="${joint_names[idx - 1]}">
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <command_interface name="effort"/>
+      <ec_module name="${module_names[idx - 1]}">
+        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
+        <param name="alias">0</param>
+        <param name="position">${idx - 1}</param>
+        <param name="slave_id">${idx - 1}</param>
+        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/${yaml_filename}</param>
+      </ec_module>
+    </joint>
+    <xacro:actuator_joint idx="${idx + 1}" n="${n}"/>
+    </xacro:if>
+  </xacro:macro>
+
   <!-- ==================== MATERIALS ==================== -->
   <material name="shell_dark"><color rgba="0.45 0.48 0.52 1.0"/></material>
   <material name="arm_dark"><color rgba="0.22 0.24 0.27 1.0"/></material>
@@ -352,7 +396,7 @@
     <child link="upper_arm_link"/>
     <origin xyz="0 0.26 1.20" rpy="3.14159 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
+    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
   </joint>
 
   <joint name="elbow_joint" type="revolute">
@@ -360,7 +404,7 @@
     <child link="forearm_link"/>
     <origin xyz="0 0 0.3" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
+    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
   </joint>
 
   <joint name="wrist_joint" type="revolute">
@@ -368,7 +412,7 @@
     <child link="hand_link"/>
     <origin xyz="0 0 0.25" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="10" velocity="1.0"/>
+    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
   </joint>
 
   <!-- Fixed joints attaching the red actuator links (identity: they move with their parent) -->
@@ -396,50 +440,10 @@
       <param name="loop_rate">1000</param>
       <param name="interface_type">EtherCAT</param>
       <param name="pdo_mapping">true</param>
-      <param name="slave_count">3</param>
+      <param name="slave_count">${num_actuators}</param>
     </hardware>
 
-    <joint name="shoulder_joint">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <ec_module name="shoulder_actuator">
-        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
-        <param name="alias">0</param>
-        <param name="position">0</param>
-        <param name="slave_id">0</param>
-        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
-      </ec_module>
-    </joint>
-
-    <joint name="elbow_joint">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <ec_module name="elbow_actuator">
-        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
-        <param name="alias">0</param>
-        <param name="position">1</param>
-        <param name="slave_id">1</param>
-        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
-      </ec_module>
-    </joint>
-
-    <joint name="wrist_joint">
-      <state_interface name="position"/>
-      <state_interface name="velocity"/>
-      <state_interface name="effort"/>
-      <command_interface name="effort"/>
-      <ec_module name="wrist_actuator">
-        <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
-        <param name="alias">0</param>
-        <param name="position">2</param>
-        <param name="slave_id">2</param>
-        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/rmd_x4_10.yaml</param>
-      </ec_module>
-    </joint>
+    <xacro:actuator_joint idx="1" n="${int(num_actuators)}"/>
   </ros2_control>
 
 </robot>

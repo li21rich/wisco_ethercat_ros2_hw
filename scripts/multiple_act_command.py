@@ -10,7 +10,11 @@ class MultiActuatorTorqueController(Node):
     def __init__(self):
         super().__init__('multi_actuator_torque_controller')
 
-        self.declare_parameter('joint_names', ['shoulder_joint', 'elbow_joint', 'wrist_joint'])
+        self.declare_parameter('joint_names', [
+            'shoulder_joint', 'elbow_joint', 'wrist_joint',
+            'joint_4', 'joint_5', 'joint_6', 'joint_7', 'joint_8',
+            'joint_9', 'joint_10', 'joint_11', 'joint_12', 'joint_13',
+            'joint_14', 'joint_15', 'joint_16'])
         self.declare_parameter('topic_names', ['/effort_controller/commands'])
         self.declare_parameter('torque_limit', 1.5)
         
@@ -20,6 +24,8 @@ class MultiActuatorTorqueController(Node):
 
         self.start_time = self.get_clock().now()
         
+        # Per-joint feedforward gains; joints not listed use k_ff_default
+        self.k_ff_default = 1.0
         self.k_ff = {
             'shoulder_joint': 1, 
             'elbow_joint': 0.9,    
@@ -89,7 +95,7 @@ class MultiActuatorTorqueController(Node):
             error = target_v - current_vel
             
             # Smooth Feedforward scaling avoids violent torque snaps at zero-crossings
-            ff_term = self.k_ff[joint] * target_v
+            ff_term = self.k_ff.get(joint, self.k_ff_default) * target_v
             
             # Proportional term
             p_term = self.kp * error
