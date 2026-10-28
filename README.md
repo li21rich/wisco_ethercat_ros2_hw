@@ -12,6 +12,9 @@ wisco_ws/src/
 │
 ├── wisco_ethercat_ros2_hw/        # <----- (THIS REPO: Hardware configuration)
 │   ├── config/rmd_x4_10.yaml      #      Hexadecimal PDO maps & gear ratios
+│   ├── config/rmd_x4_36.yaml      #      Hexadecimal PDO maps & gear ratios
+│   ├── config/rmd_x6_60.yaml      #      Hexadecimal PDO maps & gear ratios
+│   ├── config/rmd_x8_120.yaml     #      Hexadecimal PDO maps & gear ratios
 │   ├── config/controllers.yaml    #      Dictates which controllers to load
 │   ├── launch/test_bench.launch.py 
 │   ├── urdf/test_bench.urdf.xacro #      Physical robot description & slave IDs

@@ -20,8 +20,8 @@ tpdo:
   - index: 0x1a00
     channels:
       - {index: 0x6041, sub_index: 0, type: uint16}
-      - {index: 0x6064, sub_index: 0, type: int32, state_interface: position, factor: 0.0000016954}
-      - {index: 0x606c, sub_index: 0, type: int32, state_interface: velocity, factor: 0.0000016954}
+      - {index: 0x6064, sub_index: 0, type: int32, state_interface: position, factor: 0.0000479369}
+      - {index: 0x606c, sub_index: 0, type: int32, state_interface: velocity, factor: 0.0000479369}
       - {index: 0x6077, sub_index: 0, type: int16, state_interface: effort, factor: 0.03565}
       - {index: 0x603f, sub_index: 0, type: uint16}
       - {index: 0x6061, sub_index: 0, type: int8, state_interface: mode_of_operation} # Added to read live state

@@ -19,6 +19,16 @@
     <xacro:property name="max_velocity" value="8.7"/>
     <xacro:property name="yaml_filename" value="rmd_x4_36.yaml"/>
   </xacro:if>
+  <xacro:if value="${actuator_type == 'x6_60'}">
+    <xacro:property name="max_effort" value="60.0"/>
+    <xacro:property name="max_velocity" value="16.0"/>
+    <xacro:property name="yaml_filename" value="rmd_x6_60.yaml"/>
+  </xacro:if>
+  <xacro:if value="${actuator_type == 'x8_120'}">
+    <xacro:property name="max_effort" value="120.0"/>
+    <xacro:property name="max_velocity" value="13.3"/>
+    <xacro:property name="yaml_filename" value="rmd_x8_120.yaml"/>
+  </xacro:if>
   <!-- reminder: add other options here once their strength limits, speed limits, and file details are known. any other choice will cause an error. -->
 
   <!-- names for up to sixteen parts (the first three keep their starting names) -->
