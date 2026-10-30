@@ -27,9 +27,9 @@ class MultiActuatorTorqueController(Node):
         # Per-joint feedforward gains; joints not listed use k_ff_default
         self.k_ff_default = 1.0
         self.k_ff = {
-            'shoulder_joint': 1, 
-            'elbow_joint': 0.9,    
-            'wrist_joint': 1.3     
+            'shoulder_joint': 0.9, 
+            'elbow_joint': 1.3,    
+            'wrist_joint': 1.0     
         }
         self.kp = 0.12
         self.ki = 0.12   

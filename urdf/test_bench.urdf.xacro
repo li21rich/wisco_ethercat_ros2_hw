@@ -2,42 +2,56 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="multi_actuator_test_bench">
 
 <!-- ==================== SETTINGS AND PART CHOICE ==================== -->
-  <xacro:arg name="actuator_type" default="x4_10"/>   <!-- option one or option two -->
-  <xacro:arg name="num_actuators" default="3"/>        <!-- one through sixteen -->
+  <xacro:arg name="actuator_type" default="x4_10"/>   <!-- single-type mode -->
+  <xacro:arg name="num_actuators" default="3"/>        <!-- single-type mode count -->
+  <!-- Mixed chain counts (daisy chain of different actuators) -->
+  <xacro:arg name="n_x4_10" default="0"/>
+  <xacro:arg name="n_x4_36" default="0"/>
+  <xacro:arg name="n_x6_60" default="0"/>
+  <xacro:arg name="n_x8_120" default="0"/>
 
   <xacro:property name="actuator_type" value="$(arg actuator_type)"/>
-  <xacro:property name="num_actuators" value="$(arg num_actuators)"/>
+  <xacro:property name="n_x4_10" value="$(arg n_x4_10)"/>
+  <xacro:property name="n_x4_36" value="$(arg n_x4_36)"/>
+  <xacro:property name="n_x6_60" value="$(arg n_x6_60)"/>
+  <xacro:property name="n_x8_120" value="$(arg n_x8_120)"/>
+  <xacro:property name="chain_types" value="${(['x4_10']*int(n_x4_10) + ['x4_36']*int(n_x4_36) + ['x6_60']*int(n_x6_60) + ['x8_120']*int(n_x8_120)) if (int(n_x4_10)+int(n_x4_36)+int(n_x6_60)+int(n_x8_120)) > 0 else [actuator_type]*int(num_actuators)}"/>
+  <xacro:property name="num_actuators" value="${len(chain_types)}"/>
 
   <!-- details for each part: strength limit, speed limit, file name -->
-  <xacro:if value="${actuator_type == 'x4_10'}">
-    <xacro:property name="max_effort" value="10.0"/>
-    <xacro:property name="max_velocity" value="24.9"/>
-    <xacro:property name="yaml_filename" value="rmd_x4_10.yaml"/>
-  </xacro:if>
-  <xacro:if value="${actuator_type == 'x4_36'}">
-    <xacro:property name="max_effort" value="34.0"/>
-    <xacro:property name="max_velocity" value="8.7"/>
-    <xacro:property name="yaml_filename" value="rmd_x4_36.yaml"/>
-  </xacro:if>
-  <xacro:if value="${actuator_type == 'x6_60'}">
-    <xacro:property name="max_effort" value="60.0"/>
-    <xacro:property name="max_velocity" value="16.0"/>
-    <xacro:property name="yaml_filename" value="rmd_x6_60.yaml"/>
-  </xacro:if>
-  <xacro:if value="${actuator_type == 'x8_120'}">
-    <xacro:property name="max_effort" value="120.0"/>
-    <xacro:property name="max_velocity" value="13.3"/>
-    <xacro:property name="yaml_filename" value="rmd_x8_120.yaml"/>
-  </xacro:if>
+  <xacro:property name="effort_map" value="disabled"/>
+  <xacro:property name="velocity_map" value="disabled"/>
+  <xacro:property name="yaml_map" value="disabled"/>
   <!-- reminder: add other options here once their strength limits, speed limits, and file details are known. any other choice will cause an error. -->
 
   <!-- names for up to sixteen parts (the first three keep their starting names) -->
-  <xacro:property name="joint_names" value="${['shoulder_joint', 'elbow_joint', 'wrist_joint', 'joint_4', 'joint_5', 'joint_6', 'joint_7', 'joint_8', 'joint_9', 'joint_10', 'joint_11', 'joint_12', 'joint_13', 'joint_14', 'joint_15', 'joint_16']}"/>
-  <xacro:property name="module_names" value="${['shoulder_actuator', 'elbow_actuator', 'wrist_actuator', 'actuator_4', 'actuator_5', 'actuator_6', 'actuator_7', 'actuator_8', 'actuator_9', 'actuator_10', 'actuator_11', 'actuator_12', 'actuator_13', 'actuator_14', 'actuator_15', 'actuator_16']}"/>
+  <xacro:property name="joint_names" value="${['shoulder_joint', 'elbow_joint', 'wrist_joint', 'joint_4', 'joint_5', 'joint_6', 'joint_7', 'joint_8', 'joint_9', 'joint_10', 'joint_11', 'joint_12', 'joint_13', 'joint_14', 'joint_15', 'joint_16', 'joint_17', 'joint_18', 'joint_19', 'joint_20']}"/>
+  <xacro:property name="module_names" value="${['shoulder_actuator', 'elbow_actuator', 'wrist_actuator', 'actuator_4', 'actuator_5', 'actuator_6', 'actuator_7', 'actuator_8', 'actuator_9', 'actuator_10', 'actuator_11', 'actuator_12', 'actuator_13', 'actuator_14', 'actuator_15', 'actuator_16', 'actuator_17', 'actuator_18', 'actuator_19', 'actuator_20']}"/>
 
   <!-- connection and communication part for each item starting from one; repeats until all items are finished -->
   <xacro:macro name="actuator_joint" params="idx n">
     <xacro:if value="${idx &lt;= n}">
+    <xacro:property name="this_type" value="${chain_types[idx - 1]}"/>
+    <xacro:if value="${this_type == 'x4_10'}">
+      <xacro:property name="this_yaml" value="rmd_x4_10.yaml"/>
+      <xacro:property name="this_effort" value="10.0"/>
+      <xacro:property name="this_velocity" value="24.9"/>
+    </xacro:if>
+    <xacro:if value="${this_type == 'x4_36'}">
+      <xacro:property name="this_yaml" value="rmd_x4_36.yaml"/>
+      <xacro:property name="this_effort" value="34.0"/>
+      <xacro:property name="this_velocity" value="8.7"/>
+    </xacro:if>
+    <xacro:if value="${this_type == 'x6_60'}">
+      <xacro:property name="this_yaml" value="rmd_x6_60.yaml"/>
+      <xacro:property name="this_effort" value="60.0"/>
+      <xacro:property name="this_velocity" value="16.0"/>
+    </xacro:if>
+    <xacro:if value="${this_type == 'x8_120'}">
+      <xacro:property name="this_yaml" value="rmd_x8_120.yaml"/>
+      <xacro:property name="this_effort" value="120.0"/>
+      <xacro:property name="this_velocity" value="13.3"/>
+    </xacro:if>
     <joint name="${joint_names[idx - 1]}">
       <state_interface name="position"/>
       <state_interface name="velocity"/>
@@ -48,9 +62,10 @@
         <param name="alias">0</param>
         <param name="position">${idx - 1}</param>
         <param name="slave_id">${idx - 1}</param>
-        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/${yaml_filename}</param>
+        <param name="slave_config">$(find wisco_ethercat_ros2_hw)/config/${this_yaml}</param>
       </ec_module>
     </joint>
+    <!-- per-joint limits applied below via post-processing? handled in joint limit tags -->
     <xacro:actuator_joint idx="${idx + 1}" n="${n}"/>
     </xacro:if>
   </xacro:macro>
@@ -406,7 +421,7 @@
     <child link="upper_arm_link"/>
     <origin xyz="0 0.26 1.20" rpy="3.14159 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="24.9"/>
   </joint>
 
   <joint name="elbow_joint" type="revolute">
@@ -414,7 +429,7 @@
     <child link="forearm_link"/>
     <origin xyz="0 0 0.3" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="24.9"/>
   </joint>
 
   <joint name="wrist_joint" type="revolute">
@@ -422,7 +437,7 @@
     <child link="hand_link"/>
     <origin xyz="0 0 0.25" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="${max_effort}" velocity="${max_velocity}"/>
+    <limit lower="-1.57" upper="1.57" effort="10.0" velocity="24.9"/>
   </joint>
 
   <!-- Fixed joints attaching the red actuator links (identity: they move with their parent) -->
