@@ -8,7 +8,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     pkg_share = get_package_share_directory('wisco_ethercat_ros2_hw')
     urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
-    robot_desc = ParameterValue(Command(['xacro ', urdf_file, ' n_x4_10:=7', ' n_x4_36:=6', ' n_x6_60:=4', ' n_x8_120:=1']), value_type=str)
+    robot_desc = ParameterValue(Command(['xacro ', urdf_file, ' n_x4_10:=2', ' n_x4_36:=1', ' n_x6_60:=1', ' n_x8_120:=1']), value_type=str)
 
     return LaunchDescription([
         Node(
