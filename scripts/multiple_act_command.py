@@ -30,7 +30,7 @@ class MultiActuatorTorqueController(Node):
             'joint_1': 1.9, 
             'joint_2': 2.3,    
             'joint_3': 6.0,
-            'joint_3': 12.0          
+            'joint_4': 12.0          
         }
         self.kp = 0.12
         self.ki = 0.12   
