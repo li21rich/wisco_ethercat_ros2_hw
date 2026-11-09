@@ -11,7 +11,7 @@ class MultiActuatorTorqueController(Node):
         super().__init__('multi_actuator_torque_controller')
 
         self.declare_parameter('joint_names', [
-            'shoulder_joint', 'elbow_joint', 'wrist_joint',
+            'joint_1', 'joint_2', 'joint_3',
             'joint_4', 'joint_5', 'joint_6', 'joint_7', 'joint_8',
             'joint_9', 'joint_10', 'joint_11', 'joint_12', 'joint_13',
             'joint_14', 'joint_15', 'joint_16'])
@@ -25,11 +25,12 @@ class MultiActuatorTorqueController(Node):
         self.start_time = self.get_clock().now()
         
         # Per-joint feedforward gains; joints not listed use k_ff_default
-        self.k_ff_default = 1.0
+        self.k_ff_default = 3.0
         self.k_ff = {
-            'shoulder_joint': 0.9, 
-            'elbow_joint': 1.3,    
-            'wrist_joint': 1.0     
+            'joint_1': 1.9, 
+            'joint_2': 2.3,    
+            'joint_3': 6.0,
+            'joint_3': 12.0          
         }
         self.kp = 0.12
         self.ki = 0.12   
@@ -139,11 +140,16 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        zero_msg = Float64MultiArray(data=[0.0] * len(node.joint_names))
-        for pub in node.cmd_pubs:
-            pub.publish(zero_msg)
+        if rclpy.ok():
+            try:
+                zero_msg = Float64MultiArray(data=[0.0] * len(node.joint_names))
+                for pub in node.cmd_pubs:
+                    pub.publish(zero_msg)
+            except Exception:
+                pass
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

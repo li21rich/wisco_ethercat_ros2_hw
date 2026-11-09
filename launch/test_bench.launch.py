@@ -8,14 +8,13 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     pkg_share = get_package_share_directory('wisco_ethercat_ros2_hw')
     urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
-    robot_desc = ParameterValue(Command(['xacro ', urdf_file, ' n_x4_10:=2', ' n_x4_36:=1', ' n_x6_60:=1', ' n_x8_120:=1']), value_type=str)
+    robot_desc = ParameterValue(Command(['xacro ', urdf_file, ' n_x4_10:=2', ' n_x4_36:=1', ' n_x6_60:=0', ' n_x8_120:=0']), value_type=str)
 
     return LaunchDescription([
         Node(
             package='controller_manager',
             executable='ros2_control_node',
-            parameters=[{'robot_description': robot_desc},
-                       os.path.join(pkg_share, 'config', 'controllers.yaml')],
+            parameters=[os.path.join(pkg_share, 'config', 'controllers.yaml')],
             output='both',
         ),
         Node(
@@ -38,5 +37,6 @@ def generate_launch_description():
             executable='multi_actuator_torque_controller',
             name='torque_ramper',
             output='screen',
+            parameters=[{'joint_names': ['joint_1', 'joint_2', 'joint_3']}],
         ),
     ])
