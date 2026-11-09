@@ -34,8 +34,8 @@ def generate_launch_description():
         ),
         Node(
             package='wisco_ethercat_ros2_hw',
-            executable='multi_actuator_torque_controller',
-            name='torque_ramper',
+            executable='multiple_act_command_executable',
+            name='multiple_act_command_name',
             output='screen',
             parameters=[{'joint_names': ['joint_1', 'joint_2', 'joint_3', 'joint_4']}],
         ),

@@ -1,10 +1,16 @@
-## WiscoHumanoids Hardware Interface
+# WiscoHumanoids Hardware Interface
 
 Demo: https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view?usp=sharing
 
-This repository contains the physical hardware configuration, PDO mapping, demo script, and ROS 2 launch files to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy. Its contents serve as a test demo that proves you can run single or multiple servos (in this case, MyActuator RMD X-Series) with ROS 2 Jazzy and ethercat_driver_ros2 on a Linux laptop (replace with RK3588 in final implementation). Note that it is configured to run on 100Hz instead of the intended 1kHz since it was made on a device that did not have PREEMPT_RT patched.
+This repository contains the physical hardware configuration, PDO mapping, demo scripts, and ROS 2 launch files required to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
 
-RK3588: The software is split into hardware definitions (this repo) and mathematical control plugins (loaded dynamically).
+Currently, it serves as a test bench demonstrating single- or multi-servo control (specifically MyActuator RMD X-Series motors) using ROS 2 Jazzy and ethercat_driver_ros2 on a standard Linux laptop (which will be replaced by the RK3588 in the final implementation). Because this demo was developed on a machine without a PREEMPT_RT kernel patch, it is configured to run at 100Hz rather than the intended 1kHz.
+
+## System Architecture
+
+RK3588 (Real-Time Control & Hardware Interface)
+
+On the RK3588, the software stack is split into static hardware definitions (this repository) and dynamically loaded mathematical control plugins:
 
 ```text
 wisco_ws/src/
@@ -30,13 +36,15 @@ ros2_control (controller_manager process, same process as hw_interface)
 ├── ethercat_driver_ros2 (SystemInterface) ── 14x RMD-X4-10 CiA 402
 ├── wbc_controller plugin
 └── State/Command Interfaces (hardware interface exposed by ethercat_driver_ros2, consumed/written by wbc_controller)
-
+```
+Runtime Process Structure on RK3588:
+```text
 ROS 2 (minimal) on RK3588
 └── Command surface exposed by wbc_controller (action/topic for
     Cartesian/task targets) — receives targets from Jetson Thor
 ```
 
-Jetson Thor (not included here; for context):
+Jetson Thor (High-Level AI. Shown here for context):
 ```text
 jetson_ws/src/
 └── wisco_policy/
@@ -58,36 +66,38 @@ ROS 2 (full) on Jetson Thor
                      RK3588: wbc_controller's ROS 2 command surface
 ```
 
-### Quick Start Workflow
+## Quick Start Workflow
 
+Note: In the commands below, ~/Code is used as a placeholder for the parent directory containing your wisco_ws workspace.
 
-**1. Source the Environment**
-Run this in any new terminal before executing ROS 2 commands.
 ```bash
-source /opt/ros/jazzy/setup.bash && source ~/[DIRECTORY PATH]/wisco_ws/install/setup.bash
+# Source the ROS 2 environment and build from the workspace root (e.g., ~/Code/wisco_ws):
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install # After any changes you make
+source ~/Code/wisco_ws/install/setup.bash
+""" 
+Starting will require sudo so the EtherCAT driver can access the raw /dev/EtherCAT0 network device. To run without sudo use: 
+$ echo 'KERNEL=="EtherCAT[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-ethercat.rules
+$ sudo udevadm control --reload-rules && sudo udevadm trigger
+It is also recommended to configure limits.conf
+"""
+
+# Starting the EtherCAT kernel module (make sure the slave is connected)
+systemctl start ethercat
+# Launch ros2_control and hardware interface
+ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
 ```
 
-**2. Build**
-Run this from the workspace root (`~/[DIRECTORY PATH]/wisco_ws`) whenever you make changes
+By default, test_bench.launch.py runs an example Python script that sends periodic torque commands to spin the motor every few seconds.
+
+rviz2 is recommended to visualize the servo state in real-time.
+
+You can also run a script manually in a separate terminal:
 ```bash
-colcon build --symlink-install
+ros2 run wisco_ethercat_ros2_hw multiple_act_command
 ```
 
-**3. Launch**
-Requires `sudo` to allow the EtherCAT driver to access the raw `/dev/EtherCAT0` network device.
-```bash
-# 1. Start the kernel module (make sure the slave is connected)
-sudo systemctl start ethercat
-
-# 2. Launch ros2_control and the hardware interface
-sudo -E bash -c 'source /opt/ros/jazzy/setup.bash && source ~/Code/wisco_ws/install/setup.bash && ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py'
-```
-
-Note that the test bench by default runs an example python script that sends torque commands to the motor to spin every couple seconds.
-
-rviz2 is recommended to visualize the servo as it runs.
-
-### Useful Debugging Command Examples
+## Useful Debugging Commands
 
 Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
 
@@ -102,13 +112,9 @@ Open a second (sourced) terminal while the launch file is running to inspect the
 
 The package includes helper scripts to test actuator response without launching the full stack:
 
-- **`example_torque_command_ros_node.py`**: Tester for one motor
 - **`multiple_act_command.py`**: Tester for many motors
+- **`example_torque_command_ros_node.py`**: Tester for one motor (deprecated)
 
-To run an example script manually in a separate terminal:
-```bash
-ros2 run wisco_ethercat_ros2_hw stiction_breaker.py
-```
 ### To add actuators:
 1. test_bench.launch.py: configure actuator IDs and parameters 
 2. controllers.yaml: configure joint list
