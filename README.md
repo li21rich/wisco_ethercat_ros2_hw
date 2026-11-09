@@ -1,6 +1,8 @@
 # WiscoHumanoids Hardware Interface
 
-Demo: https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view?usp=sharing
+Demos: 
+https://drive.google.com/file/d/1t2eEQImacynxiRTeHf_oAAU96mAUvgAz/view
+https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view
 
 This repository contains the physical hardware configuration, PDO mapping, demo scripts, and ROS 2 launch files required to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
 
@@ -73,8 +75,7 @@ Note: In the commands below, ~/Code is used as a placeholder for the parent dire
 ```bash
 # Source the ROS 2 environment and build from the workspace root (e.g., ~/Code/wisco_ws):
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install # After any changes you make
-source ~/Code/wisco_ws/install/setup.bash
+colcon build --symlink-install && source ~/Code/wisco_ws/install/setup.bash # After any changes you make
 """ 
 Starting will require sudo so the EtherCAT driver can access the raw /dev/EtherCAT0 network device. To run without sudo use: 
 $ echo 'KERNEL=="EtherCAT[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-ethercat.rules
@@ -94,7 +95,7 @@ rviz2 is recommended to visualize the servo state in real-time.
 
 You can also run a script manually in a separate terminal:
 ```bash
-ros2 run wisco_ethercat_ros2_hw multiple_act_command
+ros2 run wisco_ethercat_ros2_hw multiple_act_command_executable
 ```
 
 ## Useful Debugging Commands
