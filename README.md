@@ -108,3 +108,8 @@ The package includes helper scripts to test actuator response without launching 
 To run an example script manually in a separate terminal:
 ```bash
 ros2 run wisco_ethercat_ros2_hw stiction_breaker.py
+```
+### To add actuators:
+1. test_bench.launch.py: configure actuator IDs and parameters 
+2. controllers.yaml: configure joint list
+3. multiple_act_command.py: calibrate new k_ff if needed
