@@ -35,6 +35,5 @@ install(
 install(
   PROGRAMS scripts/multiple_act_command.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME multiple_act_command_executable
 )
 ament_package()

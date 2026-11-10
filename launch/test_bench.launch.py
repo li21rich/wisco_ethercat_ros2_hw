@@ -3,7 +3,8 @@ import tempfile
 import yaml
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, RegisterEventHandler, OpaqueFunction
+from launch.event_handlers import OnShutdown
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -23,6 +24,19 @@ N_X4_10 = ACTUATOR_CHAIN.count('x4_10')
 N_X4_36 = ACTUATOR_CHAIN.count('x4_36')
 N_X6_60 = ACTUATOR_CHAIN.count('x6_60')
 N_X8_120 = ACTUATOR_CHAIN.count('x8_120')
+
+
+def _make_temp_file_cleanup(temp_yaml_path):
+    """Return a launch action that deletes the dynamically generated temp YAML on shutdown."""
+
+    def cleanup(context):
+        try:
+            os.unlink(temp_yaml_path)
+        except OSError:
+            pass
+        return []
+
+    return OpaqueFunction(function=cleanup)
 
 
 def generate_launch_description():
@@ -47,17 +61,17 @@ def generate_launch_description():
     #
     # The joints parameter is written at launch time from ACTUATOR_CHAIN so
     # that config/controllers.yaml never needs to be edited by hand again.
-    # The temp file is passed to BOTH ros2_control_node and the effort_controller
-    # spawner (via --param-file) so the joint list stays consistent everywhere.
+    # A merged copy of controllers.yaml is written to a temp file with the
+    # joints injected under controller_manager.ros__parameters.effort_controller
+    # so the parameter namespaces match what controller_manager expects.
     # ------------------------------------------------------------------
+    with open(base_controllers_yaml, 'r') as f:
+        controllers_config = yaml.safe_load(f)
+    controllers_config = controllers_config or {}
+    ec = controllers_config.setdefault('effort_controller', {}).setdefault('ros__parameters', {})
+    ec['joints'] = JOINT_NAMES
     temp_yaml = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
-    yaml.safe_dump({
-        'effort_controller': {
-            'ros__parameters': {
-                'joints': JOINT_NAMES,
-            }
-        }
-    }, temp_yaml)
+    yaml.safe_dump(controllers_config, temp_yaml)
     temp_yaml.close()
     temp_yaml_path = temp_yaml.name
 
@@ -70,14 +84,17 @@ def generate_launch_description():
 
     return LaunchDescription([
         characterize_mode_arg,
+        RegisterEventHandler(
+            OnShutdown(on_shutdown=[_make_temp_file_cleanup(temp_yaml_path)])
+        ),
 
         # ros2_control_node: hardware interface + controller configuration.
-        # base_controllers_yaml provides the controller_manager + controller type
-        # definitions; temp_yaml supplies the (dynamically generated) joints list.
+        # temp_yaml is a merged copy of controllers.yaml with the dynamically
+        # generated joints list injected under the correct namespace.
         Node(
             package='controller_manager',
             executable='ros2_control_node',
-            parameters=[base_controllers_yaml, temp_yaml_path],
+            parameters=[temp_yaml_path],
             output='both',
         ),
 
@@ -107,9 +124,10 @@ def generate_launch_description():
         # Multi-actuator torque command node.
         Node(
             package='wisco_ethercat_ros2_hw',
-            executable='multiple_act_command_executable',
+            executable='multiple_act_command.py',
             name='multiple_act_command_name',
             output='screen',
+            output_format='{line}',
             parameters=[
                 {'joint_names': JOINT_NAMES},
                 {'actuator_chain': ACTUATOR_CHAIN},

@@ -68,14 +68,17 @@ ROS 2 (full) on Jetson Thor
                      RK3588: wbc_controller's ROS 2 command surface
 ```
 
-## Quick Start Workflow
+## Quick Start 
 
 Note: In the commands below, ~/Code is used as a placeholder for the parent directory containing your wisco_ws workspace.
 
 ```bash
 # Source the ROS 2 environment and build from the workspace root (e.g., ~/Code/wisco_ws):
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install && source ~/Code/wisco_ws/install/setup.bash # After any changes you make
+
+colcon build --symlink-install && source ~/Code/wisco_ws/install/setup.bash 
+# ^ Build After any changes you make
+
 """ 
 Starting will require sudo so the EtherCAT driver can access the raw /dev/EtherCAT0 network device. To run without sudo use: 
 $ echo 'KERNEL=="EtherCAT[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-ethercat.rules
@@ -98,25 +101,26 @@ You can also run a script manually in a separate terminal:
 ros2 run wisco_ethercat_ros2_hw multiple_act_command_executable
 ```
 
-## Useful Debugging Commands
-
-Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
-
-* **List active ROS2 topics:** `ros2 topic list` (some of these you must be sudo)
-* **Stream live motor telemetry (pos/vel/effort):** `ros2 topic echo /joint_states`
-* **Command torque manually (for example_torque_command_ros_node.py only):** `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
-* **Check domains:** `ethercat domains` (i.e. for 3 actuators it should say "Domain0: LogBaseAddr 0x00000000, Size  96, WorkingCounter 9/9")
-* **Latency analysis:** `ros2 topic hz /joint_states` (publish rate, min/max latency, and standard deviation)
 
 
-### Standalone Demo Scripts
+## Demo Scripts
 
 The package includes helper scripts to test actuator response without launching the full stack:
 
 - **`multiple_act_command.py`**: Tester for many motors (no limit)
 - **`example_torque_command_ros_node.py`**: Tester for one motor (deprecated)
 
-### To add/update actuators in use:
+## To add/update actuators in use:
 1. test_bench.launch.py: update the actuator list
 2. controllers.yaml: update the joint list
-3. launch multiple_act_command with characterize_mode:= true to get somewhat auto-characterize motors
+3. launch multiple_act_command and adjust override params
+
+## Useful Debugging Commands
+
+Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
+
+* List active ROS2 topics: `ros2 topic list` (some of these you must be sudo)
+* Stream live motor telemetry (pos/vel/effort): `ros2 topic echo /joint_states`
+* Command torque manually (for example_torque_command_ros_node.py only): `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
+* Check domains: `ethercat domains` (i.e. for 3 actuators it should say "Domain0: LogBaseAddr 0x00000000, Size  96, WorkingCounter 9/9")
+* Latency analysis: `ros2 topic hz /joint_states` (publish rate, min/max latency, and standard deviation)
