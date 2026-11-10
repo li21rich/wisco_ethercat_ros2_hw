@@ -14,6 +14,7 @@ from ament_index_python.packages import get_package_share_directory
 # edit ONLY this list (and per-joint overrides in the controller script).
 # joint_names and the xacro model counts are derived automatically below.
 ACTUATOR_CHAIN = ['x4_10', 'x4_10', 'x4_36', 'x4_36']
+# ========================================
 
 JOINT_NAMES = [f'joint_{i + 1}' for i in range(len(ACTUATOR_CHAIN))]
 
@@ -22,7 +23,6 @@ N_X4_10 = ACTUATOR_CHAIN.count('x4_10')
 N_X4_36 = ACTUATOR_CHAIN.count('x4_36')
 N_X6_60 = ACTUATOR_CHAIN.count('x6_60')
 N_X8_120 = ACTUATOR_CHAIN.count('x8_120')
-# ========================================
 
 
 def generate_launch_description():

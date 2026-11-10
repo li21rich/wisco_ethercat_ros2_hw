@@ -113,10 +113,10 @@ Open a second (sourced) terminal while the launch file is running to inspect the
 
 The package includes helper scripts to test actuator response without launching the full stack:
 
-- **`multiple_act_command.py`**: Tester for many motors
+- **`multiple_act_command.py`**: Tester for many motors (no limit)
 - **`example_torque_command_ros_node.py`**: Tester for one motor (deprecated)
 
-### To add actuators:
-1. test_bench.launch.py: configure actuator IDs and parameters 
-2. controllers.yaml: configure joint list
-3. multiple_act_command.py: calibrate new k_ff if needed
+### To add/update actuators in use:
+1. test_bench.launch.py: update the actuator list
+2. controllers.yaml: update the joint list
+3. launch multiple_act_command with characterize_mode:= true to get somewhat auto-characterize motors
