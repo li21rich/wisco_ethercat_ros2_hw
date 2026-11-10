@@ -61,10 +61,10 @@ ROS 2 (full) on Jetson Thor
 ├── Vision / SLAM
 └── Sends high-level targets (50–100Hz) over DDS ──┐
                                                      │
-                                                     ▼
+                                                     v
                                ROS 2 DDS Network (non-RT link)
                                                      │
-                                                     ▼
+                                                     v
                      RK3588: wbc_controller's ROS 2 command surface
 ```
 

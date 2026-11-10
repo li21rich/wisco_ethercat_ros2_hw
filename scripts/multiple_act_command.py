@@ -8,10 +8,10 @@ from sensor_msgs.msg import JointState
 
 # per-joint characterization overrides (Manually tune values HERE)
 JOINT_CHARACTERIZATION_OVERRIDES = {
-    'joint_1': {'k_stiction': 1.8},
-    'joint_2': {'k_stiction': 0.85},
-    'joint_3': {'k_stiction': 1.6},
-    'joint_4': {'k_stiction': 1.9},
+    'left_shoulder_pitch': {'k_stiction': 5.3},
+    'left_shoulder_roll':  {'k_stiction': 0.869},
+    'left_shoulder_yaw':   {'k_stiction': 1.5725},
+    'left_elbow':          {'k_stiction': 1.952},
 }
 
 # defaults (Do not overwrite)
@@ -159,7 +159,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

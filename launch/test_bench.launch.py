@@ -11,13 +11,38 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 # ========================================
-# Ordered list of actuator models in series.  To scale the hardware chain,
-# edit ONLY this list (and per-joint overrides in the controller script).
-# joint_names and the xacro model counts are derived automatically below.
-ACTUATOR_CHAIN = ['x4_10', 'x4_10', 'x4_36', 'x4_36']
+# Actuation priority order (must match xacro actuated_joint_names).
+# First N joints receive hardware actuators, where N = len(ACTUATOR_CHAIN).
+# Order: both arms (14), both legs (12), torso (3), head (2) = 31 joints.
 # ========================================
+ACTUATED_JOINT_NAMES = [
+    # Left arm
+    'left_shoulder_pitch', 'left_shoulder_roll', 'left_shoulder_yaw',
+    'left_elbow', 'left_forearm_yaw', 'left_wrist_pitch', 'left_wrist_roll',
+    # Right arm
+    'right_shoulder_pitch', 'right_shoulder_roll', 'right_shoulder_yaw',
+    'right_elbow', 'right_forearm_yaw', 'right_wrist_pitch', 'right_wrist_roll',
+    # Left leg
+    'left_hip_pitch', 'left_hip_roll', 'left_hip_yaw',
+    'left_knee', 'left_ankle_pitch', 'left_ankle_roll',
+    # Right leg
+    'right_hip_pitch', 'right_hip_roll', 'right_hip_yaw',
+    'right_knee', 'right_ankle_pitch', 'right_ankle_roll',
+    # Torso
+    'torso_yaw', 'torso_roll', 'torso_pitch',
+    # Head
+    'head_yaw', 'head_pitch',
+]
 
-JOINT_NAMES = [f'joint_{i + 1}' for i in range(len(ACTUATOR_CHAIN))]
+# ========================================
+# Ordered list of actuator models in series. To scale the hardware chain,
+# edit ONLY this list. joint_names are derived automatically from the
+# actuation priority order above.
+# ========================================
+ACTUATOR_CHAIN = ['x4_10', 'x4_10', 'x4_36', 'x4_36']
+
+# First N joints from actuation order get hardware actuators.
+JOINT_NAMES = ACTUATED_JOINT_NAMES[:len(ACTUATOR_CHAIN)]
 
 # Model counts derived from ACTUATOR_CHAIN for the xacro description.
 N_X4_10 = ACTUATOR_CHAIN.count('x4_10')
@@ -89,12 +114,13 @@ def generate_launch_description():
         ),
 
         # ros2_control_node: hardware interface + controller configuration.
-        # temp_yaml is a merged copy of controllers.yaml with the dynamically
-        # generated joints list injected under the correct namespace.
         Node(
             package='controller_manager',
             executable='ros2_control_node',
-            parameters=[temp_yaml_path],
+            parameters=[
+                temp_yaml_path,
+                {'robot_description': robot_desc},
+            ],
             output='both',
         ),
 
@@ -105,7 +131,7 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_desc}],
         ),
 
-        # Spawn the standard broadcasters / controllers.
+        # Spawn controllers
         Node(
             package='controller_manager',
             executable='spawner',
@@ -114,11 +140,7 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='spawner',
-            arguments=[
-                'effort_controller',
-                '--controller-manager', '/controller_manager',
-                '--param-file', temp_yaml_path,
-            ],
+            arguments=['effort_controller', '--controller-manager', '/controller_manager'],
         ),
 
         # Multi-actuator torque command node.
