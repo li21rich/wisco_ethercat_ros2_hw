@@ -22,7 +22,7 @@
   <xacro:property name="num_actuators" value="${len(chain_types)}"/>
 
   <xacro:property name="effort_map" value="disabled"/>
-  <xacro:property name="velocity_map" value="disabled"/>
+  <xacro:property name="velocity_map" value="enabled"/>
   <xacro:property name="yaml_map" value="disabled"/>
 
   <!-- ==================== JOINT NAMING ==================== -->
@@ -61,6 +61,9 @@
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
         <command_interface name="effort"/>
+        <xacro:if value="${velocity_map != 'disabled'}">
+          <command_interface name="velocity"/>
+        </xacro:if>
         <ec_module name="${module_names[idx - 1]}">
           <plugin>ethercat_generic_plugins/EcCiA402Drive</plugin>
           <param name="alias">0</param>
@@ -126,14 +129,14 @@
       <inertia ixx="0.00271774684" ixy="4.63173551e-06" ixz="-0.000191215983" iyy="0.00294832905" iyz="1.43051997e-05" izz="0.00224623993"/>
     </inertial>
     <visual>
-      <origin xyz="-0.0105 0.0204 0.0775" rpy="-0.258 -0.130 0"/>
-      <geometry><cylinder radius="0.048" length="0.162"/></geometry>
-      <material name="arm_dark"/>
-    </visual>
-    <collision>
-      <origin xyz="-0.0105 0.0204 0.0775" rpy="-0.258 -0.130 0"/>
-      <geometry><cylinder radius="0.048" length="0.162"/></geometry>
-    </collision>
+  <origin xyz="-0.0105 0.0204 0.0775" rpy="0 0 0"/>
+  <geometry><cylinder radius="0.048" length="0.162"/></geometry>
+  <material name="arm_dark"/>
+</visual>
+<collision>
+  <origin xyz="-0.0105 0.0204 0.0775" rpy="0 0 0"/>
+  <geometry><cylinder radius="0.048" length="0.162"/></geometry>
+</collision>
   </link>
   <xacro:actuator_visual_hub parent_link="torso_yaw_link" radius="0.052" length="0.045" rpy="0 0 0" joint_idx="26"/>
 

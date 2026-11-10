@@ -82,33 +82,25 @@ def generate_launch_description():
     )
 
     # ------------------------------------------------------------------
-    # Dynamic effort_controller joint-list injection.
+    # Dynamic velocity_controller joint-list injection.
     #
     # The joints parameter is written at launch time from ACTUATOR_CHAIN so
     # that config/controllers.yaml never needs to be edited by hand again.
     # A merged copy of controllers.yaml is written to a temp file with the
-    # joints injected under controller_manager.ros__parameters.effort_controller
+    # joints injected under controller_manager.ros__parameters.velocity_controller
     # so the parameter namespaces match what controller_manager expects.
     # ------------------------------------------------------------------
     with open(base_controllers_yaml, 'r') as f:
         controllers_config = yaml.safe_load(f)
     controllers_config = controllers_config or {}
-    ec = controllers_config.setdefault('effort_controller', {}).setdefault('ros__parameters', {})
+    ec = controllers_config.setdefault('velocity_controller', {}).setdefault('ros__parameters', {})
     ec['joints'] = JOINT_NAMES
     temp_yaml = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
     yaml.safe_dump(controllers_config, temp_yaml)
     temp_yaml.close()
     temp_yaml_path = temp_yaml.name
 
-    # LaunchArgument: run automated per-joint characterization from the CLI.
-    characterize_mode_arg = DeclareLaunchArgument(
-        'characterize_mode',
-        default_value='false',
-        description='Enable automated per-joint stiction/viscous characterization',
-    )
-
     return LaunchDescription([
-        characterize_mode_arg,
         RegisterEventHandler(
             OnShutdown(on_shutdown=[_make_temp_file_cleanup(temp_yaml_path)])
         ),
@@ -140,23 +132,21 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='spawner',
-            arguments=['effort_controller', '--controller-manager', '/controller_manager'],
+            arguments=['velocity_controller', '--controller-manager', '/controller_manager'],
         ),
 
-        # Multi-actuator torque command node.
+        # Multi-actuator velocity command node (CSV mode).
         Node(
             package='wisco_ethercat_ros2_hw',
-            executable='multiple_act_command.py',
-            name='multiple_act_command_name',
+            executable='multi_velocity_cmd.py',
+            name='multi_velocity_cmd_name',
             output='screen',
             output_format='{line}',
             parameters=[
                 {'joint_names': JOINT_NAMES},
-                {'actuator_chain': ACTUATOR_CHAIN},
-                {'characterize_mode': LaunchConfiguration('characterize_mode')},
+                {'topic_names': ['/velocity_controller/commands']},
                 {'speed_factor': 1.5},
                 {'amplitude': 1.0},
-                {'phase_offset': 0.4},
             ],
         ),
     ])

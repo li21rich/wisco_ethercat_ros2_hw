@@ -92,12 +92,16 @@ systemctl start ethercat
 ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
 ```
 
-By default, test_bench.launch.py runs an example Python script that sends periodic torque commands to spin the motor every few seconds.
+By default, test_bench.launch.py runs the CSV velocity wave controller (`multi_velocity_cmd.py`) which sends sinusoidal velocity commands to the motors.
 
 rviz2 is recommended to visualize the servo state in real-time.
 
-You can also run a script manually in a separate terminal:
+You can also run scripts manually in a separate terminal:
 ```bash
+# CSV velocity wave (current default)
+ros2 run wisco_ethercat_ros2_hw multi_velocity_cmd.py
+
+# Legacy torque pulse tester (for CST mode)
 ros2 run wisco_ethercat_ros2_hw multiple_act_command_executable
 ```
 
@@ -107,8 +111,90 @@ ros2 run wisco_ethercat_ros2_hw multiple_act_command_executable
 
 The package includes helper scripts to test actuator response without launching the full stack:
 
-- **`multiple_act_command.py`**: Tester for many motors (no limit)
-- **`example_torque_command_ros_node.py`**: Tester for one motor (deprecated)
+- **`multi_velocity_cmd.py`**: CSV velocity wave controller (current default, publishes to `/velocity_controller/commands`)
+- **`multiple_act_command.py`**: Legacy torque pulse tester for many motors (for CST mode, publishes to `/effort_controller/commands`)
+- **`example_torque_command_ros_node.py`**: Legacy single-motor torque stiction breaker (deprecated)
+- **`example_ros_node`** (C++): Minimal ROS API awaiting torque commands on `/effort_controller/commands` (preparation for CST)
+
+## Operation Mode Note
+
+The servo configurations (`config/rmd_*.yaml`) are currently set to **Cyclic Synchronous Velocity (CSV, mode of operation 9)** for development and testing. The final implementation should use **Cyclic Synchronous Torque (CST, mode of operation 10)**.
+
+Before moving to CST in the final implementation, apply all of the following:
+
+### 1. Motor configs (`config/rmd_*.yaml` — all 4 files)
+```yaml
+# SDO: set drive mode at startup
+sdo:
+  - {index: 0x6060, sub_index: 0, type: int8, value: 10}  # CST
+
+# RPDO: command torque on 0x6071, disable velocity on 0x60ff
+rpdo:
+  - index: 0x1600
+    channels:
+      - {index: 0x6040, sub_index: 0, type: uint16, default: 0}
+      - {index: 0x607a, sub_index: 0, type: int32, default: 0}
+      - {index: 0x60ff, sub_index: 0, type: int32, default: 0}  # No command interface (CSV target velocity)
+      - {index: 0x6071, sub_index: 0, type: int16, command_interface: effort, factor: <motor_factor>, default: 0}  # Target torque
+      - {index: 0x6072, sub_index: 0, type: int16, default: 1000}
+      - {index: 0x6060, sub_index: 0, type: int8, command_interface: mode_of_operation, default: 10}  # CST
+      - {index: 0x2ffd, sub_index: 0, type: uint8, default: 0}
+```
+Use the motor-specific `factor` for effort (e.g., `66.667` for x4_10, `28.05` for x4_36, `25.397` for x6_60, `22.222` for x8_120).
+
+### 2. URDF (`urdf/test_bench.urdf.xacro`)
+```xml
+<!-- Top of file: disable velocity, enable effort -->
+<xacro:property name="effort_map" value="enabled"/>
+<xacro:property name="velocity_map" value="disabled"/>
+<xacro:property name="yaml_map" value="disabled"/>
+```
+The `actuator_joint` macro already conditionally exposes `effort` when `effort_map != 'disabled'`.
+
+### 3. Controllers (`config/controllers.yaml`)
+```yaml
+controller_manager:
+  ros__parameters:
+    update_rate: 100  # or 1000 with PREEMPT_RT
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    effort_controller:
+      type: effort_controllers/JointGroupEffortController
+```
+
+### 4. Launch file (`launch/test_bench.launch.py`)
+```python
+# Spawn effort_controller, not velocity_controller
+Node(
+    package='controller_manager',
+    executable='spawner',
+    arguments=['effort_controller', '--controller-manager', '/controller_manager'],
+),
+```
+The dynamic joint injection already targets `effort_controller` (see `generate_launch_description()`).
+
+### 5. Topic / API
+- Torque commands go to `/effort_controller/commands` (std_msgs/Float64MultiArray)
+- The `example_ros_node` C++ API already subscribes to this topic and holds the latest torque commands
+- `multiple_act_command.py` (legacy) publishes torque waveforms to this topic
+
+### 6. Verify
+```bash
+# Build and launch
+colcon build --symlink-install && source install/setup.bash
+ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
+
+# Check drive mode in joint_states
+ros2 topic echo /joint_states | grep mode_of_operation  # should show 10
+
+# Verify effort_controller is active
+ros2 control list_controllers
+```
+
+### Estimated effort
+~15 minutes for a clean switch if all files are updated together. The main risk is forgetting one of the 4 motor configs or the URDF property — use the checklist above.
 
 ## To add/update actuators in use:
 1. test_bench.launch.py: update the actuator list

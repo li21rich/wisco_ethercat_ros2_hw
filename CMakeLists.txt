@@ -7,9 +7,17 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
+
+# --- example_ros_node: minimal ROS API that awaits torque commands ---
+add_executable(example_ros_node src/example_ros_node.cpp)
+target_compile_features(example_ros_node PRIVATE cxx_std_17)
+ament_target_dependencies(example_ros_node rclcpp std_msgs)
+install(TARGETS example_ros_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -34,6 +42,11 @@ install(
 
 install(
   PROGRAMS scripts/multiple_act_command.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
+  PROGRAMS scripts/multi_velocity_cmd.py
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()

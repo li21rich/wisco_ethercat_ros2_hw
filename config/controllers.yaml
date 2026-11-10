@@ -5,10 +5,10 @@ controller_manager:
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
-    effort_controller:
-      type: effort_controllers/JointGroupEffortController
+    velocity_controller:
+      type: velocity_controllers/JointGroupVelocityController
 
-#effort_controller:
+#velocity_controller:
  # ros__parameters:
     # NOTE: the joints list is injected dynamically at launch time from ACTUATOR_CHAIN
     # (see launch/test_bench.launch.py).  Do not edit the joint list here; it is
