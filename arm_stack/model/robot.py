@@ -48,7 +48,9 @@ class ArmModel:
         self.velocity_limit = np.array([self.nominal.velocityLimit[i] for i in self.vidx])
         self.coulomb = np.zeros(len(self.joint_names))
         self.viscous = np.zeros(len(self.joint_names))
-        self.model = self.nominal
+        # a copy: calibration layers edit self.model and read the nominal values,
+        # so applying a calibration twice must not compound
+        self.model = self.nominal.copy()
         self.data = self.model.createData()
         self.overlay = None
 

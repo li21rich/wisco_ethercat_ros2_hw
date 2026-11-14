@@ -475,3 +475,19 @@ def test_independent_poe_fk_matches_pinocchio(model, full):
         for frame in ('wrist_crank', 'wrist_rod'):
             err = np.abs(d.oMf[full.getFrameId(frame)].homogeneous - poe.fk(qmap, frame)).max()
             assert err < 1e-9, (frame, err)
+
+
+def test_overlay_applied_twice_does_not_compound():
+    arm = load_arm()
+    m = ArmModel(arm.urdf, arm.names)
+    overlay = {arm.names[3]: {'dxyz': [0.001, -0.0005, 0.0007], 'drot': [0.002, 0.0, -0.001]}}
+    q = np.linspace(-0.3, 0.4, m.n)
+    m.apply_overlay(overlay)
+    once = m.fk(q).homogeneous.copy()
+    m.apply_overlay(overlay)
+    np.testing.assert_allclose(m.fk(q).homogeneous, once, atol=1e-12)
+    # and the nominal model is untouched
+    plain = ArmModel(arm.urdf, arm.names)
+    np.testing.assert_allclose(plain.fk(q).homogeneous,
+                               ArmModel(arm.urdf, arm.names).fk(q).homogeneous, atol=1e-12)
+    assert not np.allclose(plain.fk(q).homogeneous, once, atol=1e-6)
