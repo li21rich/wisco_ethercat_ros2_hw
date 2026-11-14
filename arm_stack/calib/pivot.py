@@ -41,29 +41,50 @@ def spread_mm(tips: np.ndarray) -> float:
     return float(np.max(np.linalg.norm(tips - tips.mean(axis=0), axis=1)) * 1e3)
 
 
-def fit_offsets(model, Q: np.ndarray, iters: int = 20):
-    """Gauss-Newton on (offsets d, divot p). Returns d, p, observability, rms."""
+def _pivot_residual(model, Q, d, p):
+    return np.concatenate([model.tool_position(q + d) - p for q in Q])
+
+
+def fit_offsets(model, Q: np.ndarray, iters: int = 30, rank_tol: float = 1e-3,
+                max_step: float = 2 * DEG):
+    """Damped Gauss-Newton on (offsets d, divot p). Returns d, p, observability, rms.
+
+    Directions the pivot cannot see (a rotation of the whole arm about J1 just
+    moves the divot) have near-zero singular values; they are cut at rank_tol
+    of the largest, each step is capped at max_step per offset, and a step is
+    kept only if it lowers the residual, so a weak direction cannot throw the
+    fit into another minimum.
+    """
     n = model.n
     d = np.zeros(n)
     p = np.mean([model.tool_position(q) for q in Q], axis=0)
+    r = _pivot_residual(model, Q, d, p)
+    cost = float(r @ r)
     observability = np.zeros(n)
+    lam = 1e-6
     for _ in range(iters):
-        rows, res = [], []
-        for q in Q:
-            J = model.jacobian(q + d)[:3]
-            rows.append(np.hstack([J, -np.eye(3)]))
-            res.append(model.tool_position(q + d) - p)
-        A = np.vstack(rows)
-        r = np.concatenate(res)
+        A = np.vstack([np.hstack([model.jacobian(q + d)[:3], -np.eye(3)]) for q in Q])
         U, S, Vt = np.linalg.svd(A, full_matrices=False)
-        keep = S > S[0] * 1e-4
+        keep = S > S[0] * rank_tol
         V = Vt[keep].T
-        step = -V @ ((U[:, keep].T @ r) / S[keep])
-        d += step[:n]
-        p += step[n:]
-        # how much of each offset direction lies in the observable subspace
         observability = np.linalg.norm(V[:n], axis=1)
-        if np.linalg.norm(step) < 1e-10:
+        Sk = S[keep]
+        accepted = False
+        for _ in range(8):
+            step = -V @ ((U[:, keep].T @ r) * Sk / (Sk ** 2 + lam * Sk[0] ** 2))
+            big = np.max(np.abs(step[:n]))
+            if big > max_step:
+                step *= max_step / big
+            r_new = _pivot_residual(model, Q, d + step[:n], p + step[n:])
+            c_new = float(r_new @ r_new)
+            if c_new < cost:
+                d, p, r, accepted = d + step[:n], p + step[n:], r_new, True
+                rel = (cost - c_new) / max(cost, 1e-30)
+                cost = c_new
+                lam = max(lam / 3, 1e-9)
+                break
+            lam *= 10
+        if not accepted or rel < 1e-12 or np.linalg.norm(step) < 1e-10:
             break
     rms = float(np.sqrt(np.mean(np.sum(np.reshape(r, (-1, 3)) ** 2, axis=1))))
     return d, p, observability, rms
