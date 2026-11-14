@@ -183,6 +183,7 @@ ros2 launch wisco_ethercat_ros2_hw arm01.launch.py
 # one command per stage; --sim runs the same code on the sim backend
 ros2 run wisco_ethercat_ros2_hw arm bringup --sim      # or: python3 -m arm_stack.cli bringup --sim
 ros2 run wisco_ethercat_ros2_hw arm all --sim --quick --fresh   # every stage on one sim arm
+ros2 run wisco_ethercat_ros2_hw arm all --sim --quick --fresh --no-mocap   # the chain without mocap
 ros2 run wisco_ethercat_ros2_hw arm status
 ros2 run wisco_ethercat_ros2_hw arm export pace ~/arm_logs/SESSION.mcap out
 ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/arm_logs/B.mcap
@@ -199,10 +200,48 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | 6 Friction | `arm friction` | `friction` |
 | 7 Latency | `arm latency` | `latency_ms` |
 | 8 Kinematics | `arm pivot` | `validation.pivot_spread_mm` |
+| Plate kinematics (no mocap) | `arm plate` | `zero_offsets_rad`, `kinematic_overlay`, `joint_stiffness_nm_per_rad` |
 | 9 PACE | `arm pace` | `pace` |
 | Mocap kinematics | `arm mocap-calib` | `zero_offsets_rad`, `kinematic_overlay`, `joint_stiffness_nm_per_rad` |
 | Mocap repeatability | `arm mocap-repeat` | `validation.repeatability_rp_mm` (+ tuned settings to apply) |
+| ISO 9283 repeatability | `arm repeat [--indicators]` | `validation.repeatability_rp_mm` |
 | Release gate | `arm validate` | `validation.*`, report beside the calibration file |
+
+### Without mocap: divot plate and indicator cube
+
+Kinematics and repeatability have a path that needs no mocap. `arm all` picks it when the
+client reports no mocap (`--no-mocap` makes the sim do that): `plate` instead of
+`mocap-calib`, `repeat` on the indicator cube instead of `mocap-repeat` (its tuning is skipped
+with the reason), and `validate` measures repeatability on the cube.
+
+- `arm plate`: a machined plate with 6 to 9 divots at known positions (`plate:` in the joint
+  config; the numbers there are placeholders until the plate drawing exists,
+  `needs_drawing: true`). Hand guide the probe tip into each divot in several configurations,
+  then again with the 1 kg test mass hanging. One fit from tip positions only, with the plate's
+  divot spacing as the length reference: plate pose, probe-tip offset, joint zero offsets, a
+  rank-selected part of the kinematic overlay, stiffness and backlash (`calib/kinfit.py`, shared
+  with mocap-calib). J1's zero folds into the plate pose and keeps its jig value. J7's zero and the
+  probe's angle about J7 are one parameter: the tip offset is stored folded into J7's zero and
+  origin (exact at tool0; its radial part is reported). The report gives each parameter's
+  observability and 1 sigma and the condition number. The held-out divots (`plate.held_out`)
+  are never fitted: their tip RMS and the pair distances to the other divots, measured against
+  the drawing, validate the fit (with the parameters as stored). Pass: held-out RMS < 0.5 mm,
+  condition number < 1e4.
+- `arm repeat --indicators`: ISO 9283 (warm-up, 5 poses x 30 cycles, `--quick` 6) with three
+  orthogonal dial indicators on a cube on the flange (`indicator_cube:` in the joint config,
+  `arm_stack/hw/indicator_cube.py`). Translation only, one pose per fixture setup: set the stand
+  and zero the indicators at a pose, run its cycles, move to the next. On hardware you type the
+  three readings (mm) each cycle while the arm holds; digital indicators can go through
+  `SerialIndicatorReader` (a stub until the interface is on the bench). `arm validate` without
+  mocap asks before using the cube; the sim uses it automatically.
+
+```bash
+arm plate                      # hardware: prompts for each divot and configuration
+arm repeat --indicators        # hardware: prompts per pose (fixture) and per cycle (readings)
+arm plate --sim --quick        # sim operator: truth IK into each divot
+arm repeat --sim --quick --indicators
+arm all --sim --quick --fresh --no-mocap
+```
 
 ### Single-joint bench (Phases 1 and 2, before the arm is assembled)
 
@@ -253,7 +292,8 @@ Layout:
   `log/` (MCAP recorder, exports), `cli.py`.
 
 Tests: `test/test_arm_law.cpp` (gtest) and `test/arm_stack/` (pytest, same law cases in
-Python, optimizers, ISO 9283, recorder). The Phase 0 gate (every procedure recovers its
+Python, optimizers, ISO 9283, recorder; `test_nomocap.py` runs the plate fit and the cube
+repeatability in sim). The Phase 0 gate (every procedure recovers its
 injected errors in sim) is `ARM_PHASE0_GATE=1 python3 -m pytest test/arm_stack/test_phase0_gate.py`.
 
 Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slave (0x6040/0x6041

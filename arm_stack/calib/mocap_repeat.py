@@ -20,6 +20,11 @@ Calibration fixes accuracy, not repeatability. This stage:
 Pass: RP under 0.5 mm per pose on the confirmation run, no steady drift.
 Writes validation.repeatability_rp_mm; the tuned values are reported for the
 joint config (gains, friction_ff_gain, approach, settle_s).
+
+The ISO measurement itself (iso_run, iso_measure) also takes the dial-indicator
+cube (hw/indicator_cube.py) as its position source, one pose per fixture
+setup: `arm repeat --indicators` and `arm validate` without mocap use it. The
+tuning here needs the mocap (every pose, every cycle, no operator).
 """
 
 from __future__ import annotations
@@ -115,14 +120,39 @@ def marker_position(mocap, client, q_hold=None, seconds=0.05):
     return np.mean(P, axis=0)
 
 
+def source_position(source, client, q_hold):
+    """Attained position from either source: the mocap cluster (averaged while
+    holding) or a fixture source such as the indicator cube (`position`)."""
+    if hasattr(source, 'marker_pose'):
+        return marker_position(source, client, q_hold)
+    return source.position(client, q_hold)
+
+
 def iso_run(ctx, poses, cycles, trial: Trial, mocap, rng, home=None, ref_pose=None):
-    """cycles x poses from home. Returns positions (cycles, poses, 3), overshoot, ref positions."""
+    """cycles x poses from home. Returns positions (cycles, poses, 3), overshoot, ref positions.
+
+    `mocap` is the position source. The mocap sees every pose, so each cycle
+    visits all poses. A fixture source (`one_pose_per_setup`, the indicator
+    cube) is set up at one pose at a time: all cycles there, then the next
+    pose; each pose's positions are then in that setup's own zeroed frame,
+    which RP and drift do not mind. The thermal reference pose needs the
+    mocap and is skipped for a fixture."""
     client = ctx.client
     home = safe_home(ctx.model) if home is None else home
     _apply_gains(ctx, trial)
     P = np.zeros((cycles, len(poses), 3))
     over = 0.0
     refs = []
+    if getattr(mocap, 'one_pose_per_setup', False):
+        for k, q in enumerate(poses):
+            move_to(client, home, max_speed=0.8, settle=0.05)
+            reach(ctx, q, trial, rng)
+            mocap.setup(ctx, k, q)
+            for c in range(cycles):
+                move_to(client, home, max_speed=0.8, settle=0.05)
+                over = max(over, reach(ctx, q, trial, rng))
+                P[c, k] = source_position(mocap, client, q)
+        return P, over, refs
     for c in range(cycles):
         for k, q in enumerate(poses):
             move_to(client, home, max_speed=0.8, settle=0.05)
@@ -133,6 +163,38 @@ def iso_run(ctx, poses, cycles, trial: Trial, mocap, rng, home=None, ref_pose=No
             reach(ctx, ref_pose, Trial(approach=1, settle_s=0.5), rng)
             refs.append((client.time_since_power_on(), marker_position(mocap, client, ref_pose)))
     return P, over, refs
+
+
+def warm_up(ctx, poses, warm_s: float = None):
+    """Motion through the poses until warm_s has passed (20 min on hardware, 2 s in sim)."""
+    client = ctx.client
+    warm_s = warm_s if warm_s is not None else (2.0 if ctx.sim else 1200.0)
+    home = safe_home(ctx.model)
+    t_end = client.time_since_power_on() + warm_s
+    while True:
+        for q in poses:
+            move_to(client, q, max_speed=0.8, settle=0.0)
+        move_to(client, home, max_speed=0.8, settle=0.0)
+        if math.isnan(t_end) or client.time_since_power_on() >= t_end:
+            break
+
+
+def iso_measure(ctx, source, cycles: int, rng, warm_s: float = None, poses=None) -> Dict:
+    """ISO 9283 measurement with the tuned settings (joint config
+    `repeatability_tuning`, else defaults): warm-up, cycles x poses, RP and
+    drift per pose. Used by `arm validate` and `arm repeat`, with the mocap or
+    the indicator cube."""
+    poses = iso_poses(ctx) if poses is None else poses
+    warm_up(ctx, poses, warm_s)
+    noise = source.static_noise_3sigma_m()
+    tuned = (ctx.arm.raw.get('repeatability_tuning') or {})
+    trial = Trial(**{k: v for k, v in tuned.items() if k in Trial().as_dict()})
+    P, _, _ = iso_run(ctx, poses, cycles, trial, source, rng)
+    rp = iso_rp(P)['rp'] * 1e3
+    dr = drift(P) * 1e3
+    ok = bool(noise < 1e-4 and np.all(rp < RP_MM) and np.all(dr < DRIFT_MM))
+    return {'rp_mm': rp, 'drift_mm': dr, 'noise_3sigma_m': noise, 'passed': ok, 'positions': P,
+            'cycles': cycles, 'source': getattr(source, 'name', 'mocap')}
 
 
 def _apply_gains(ctx, trial: Trial) -> bool:

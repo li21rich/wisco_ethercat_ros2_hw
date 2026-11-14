@@ -6,7 +6,9 @@ the report is saved beside the calibration file (the CLI does that).
   Repeatability  ISO 9283: warm up 20 min, 5 poses x 30 cycles from a fixed home,
                  flange measured by the mocap cluster (static 3 sigma checked
                  under 0.1 mm first). RP < 0.5 mm per pose, no steady drift.
-                 Without mocap: dial indicators on a cube fixture, by hand.
+                 Without mocap: three dial indicators on a cube on the flange
+                 (hw/indicator_cube.py), one pose per fixture setup; the sim
+                 uses it automatically, hardware asks first.
   Pivot          stage 8 rerun at the end of the warm session: spread < 3 mm
                  and within 1 mm of the cold result.
   Hold           slow up/down sweeps through 10 poses not used in the stage 5
@@ -27,6 +29,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 
 from ..control.motion import Trace, move_to, stream
+from ..hw import indicator_cube
 from ..hw.client import Command
 from . import mocap_repeat, pivot
 from .common import DEG, StageContext, StageResult, random_poses, safe_home
@@ -101,6 +104,23 @@ def hold_test(ctx, n_poses, exclude: Sequence[np.ndarray]):
     return frac, np.array(drifts), poses
 
 
+def repeatability_source(ctx: StageContext):
+    """(source, why-not): the mocap if there is one, else the indicator cube
+    (sim: automatically; hardware: if the operator has the fixture ready)."""
+    mocap = ctx.client.mocap()
+    if mocap is not None:
+        return mocap, None
+    if not ctx.sim:
+        try:
+            answer = input('No mocap. Measure repeatability with the dial-indicator cube now '
+                           '(one fixture setup per ISO pose, readings typed per cycle)? [y/N] ')
+        except EOFError:
+            answer = ''
+        if not answer.strip().lower().startswith('y'):
+            return None, 'no mocap and the indicator cube declined'
+    return indicator_cube.for_context(ctx), None
+
+
 def run(ctx: StageContext, replay_trajectories: Optional[List[np.ndarray]] = None,
         replay_dt: float = 0.001, warm_s: float = None) -> StageResult:
     lines, flags = [], []
@@ -109,39 +129,22 @@ def run(ctx: StageContext, replay_trajectories: Optional[List[np.ndarray]] = Non
     t_on = client.time_since_power_on()
     lines.append('time since power on at start: %s' % ('%.0f s' % t_on if not math.isnan(t_on) else 'unknown'))
 
-    # 1. repeatability (includes the warm-up)
-    mocap = client.mocap()
-    if mocap is not None:
+    # 1. repeatability (includes the warm-up): mocap, else the dial-indicator cube
+    source, why = repeatability_source(ctx)
+    if source is not None:
         rep = mocap_repeat
-        rng = np.random.default_rng(11)
-        warm_s = warm_s if warm_s is not None else (2.0 if ctx.sim else 1200.0)
-        poses = rep.iso_poses(ctx)
-        home = safe_home(ctx.model)
-        t_end = client.time_since_power_on() + warm_s
-        while True:
-            for q in poses:
-                move_to(client, q, max_speed=0.8, settle=0.0)
-            move_to(client, home, max_speed=0.8, settle=0.0)
-            if math.isnan(t_end) or client.time_since_power_on() >= t_end:
-                break
-        noise = mocap.static_noise_3sigma_m()
-        cycles = 5 if ctx.quick else 30
-        tuned = (ctx.arm.raw.get('repeatability_tuning') or {})
-        trial = rep.Trial(**{k: v for k, v in tuned.items() if k in rep.Trial().as_dict()})
-        P, _, _ = rep.iso_run(ctx, poses, cycles, trial, mocap, rng)
-        rp = rep.iso_rp(P)['rp'] * 1e3
-        dr = rep.drift(P) * 1e3
-        ok = bool(noise < 1e-4 and np.all(rp < rep.RP_MM) and np.all(dr < rep.DRIFT_MM))
+        res = rep.iso_measure(ctx, source, 5 if ctx.quick else 30, np.random.default_rng(11), warm_s)
+        rp, dr, noise, ok = res['rp_mm'], res['drift_mm'], res['noise_3sigma_m'], res['passed']
         results['repeatability'] = ok
-        lines.append('repeatability: mocap 3 sigma %.3f mm; RP %s mm (pass < %.1f); drift %s mm -> %s' % (
-            noise * 1e3, np.round(rp, 3).tolist(), rep.RP_MM, np.round(dr, 3).tolist(), 'PASS' if ok else 'FAIL'))
+        lines.append('repeatability (%s): 3 sigma %.3f mm; RP %s mm (pass < %.1f); drift %s mm -> %s' % (
+            res['source'], noise * 1e3, np.round(rp, 3).tolist(), rep.RP_MM, np.round(dr, 3).tolist(),
+            'PASS' if ok else 'FAIL'))
         rp_max = float(np.max(rp))
     else:
         results['repeatability'] = False
         rp_max = None
-        lines.append('repeatability: no mocap; measure with three dial indicators on the cube fixture '
-                     'and record it by hand -> NOT RUN')
-        flags.append('repeatability needs mocap or the dial-indicator fixture')
+        lines.append('repeatability: %s -> NOT RUN' % why)
+        flags.append('repeatability needs mocap or the dial-indicator cube (arm repeat --indicators)')
 
     # 2. hold
     exclude = [np.array(q) for q in ((ctx.calibration.get('validation') or {}).get('gravity_fit_poses') or [])]

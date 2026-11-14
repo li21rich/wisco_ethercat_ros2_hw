@@ -22,19 +22,19 @@ Writes zero_offsets_rad, kinematic_overlay, joint_stiffness_nm_per_rad.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import pinocchio as pin
 
 from ..control.motion import move_to
 from ..hw.client import Command, Payload
-from ..pace.lm import levenberg_marquardt
+from . import kinfit
 from .common import DEG, StageContext, StageResult, feasible_poses, mount_payload, safe_home
+from .kinfit import BACKLASH_EPS, compose_overlay, mean_rotation, rms  # noqa: F401 (re-exported)
 
 ROT_WEIGHT = 0.05             # m per rad: orientation residuals count like 5 cm of lever
 LOAD_KG = 1.0
-BACKLASH_EPS = 0.05           # Nm, the tanh width of the backlash state
 
 
 @dataclass
@@ -43,13 +43,6 @@ class Sample:
     tau: np.ndarray           # measured joint torque, Nm
     pose: pin.SE3             # marker cluster in the mocap frame
     loaded: bool
-
-
-def mean_rotation(R) -> np.ndarray:
-    U, _, Vt = np.linalg.svd(np.mean(R, axis=0))
-    if np.linalg.det(U @ Vt) < 0:
-        U[:, -1] *= -1
-    return U @ Vt
 
 
 def measure(ctx: StageContext, q_goal, mocap, loaded, settle=0.6, average=0.15) -> Sample:
@@ -69,57 +62,26 @@ def measure(ctx: StageContext, q_goal, mocap, loaded, settle=0.6, average=0.15) 
                   pin.SE3(mean_rotation(np.array(R)), np.mean(P, axis=0)), loaded)
 
 
-class KinematicFit:
+class KinematicFit(kinfit.KinematicModel):
     """Parameter vector (all increments on the current calibration):
     dzero[n], (dxyz[3], drot[3]) per joint, base_in_mocap twist[6],
     marker_in_flange twist[6], compliance[n] (rad/Nm), backlash[n] (rad)."""
 
     def __init__(self, model, frame='flange'):
-        self.model = model.copy()
-        self.n = n = model.n
-        self.frame = frame if model.model.existFrame(frame) else model.tool_frame
-        self.fid = self.model.model.getFrameId(self.frame)
-        self.jid = list(self.model.jid)
-        self.placements0 = [self.model.model.jointPlacements[j].copy() for j in self.jid]
-        self.sl = {
-            'dzero': slice(0, n), 'overlay': slice(n, 7 * n), 'base': slice(7 * n, 7 * n + 6),
-            'marker': slice(7 * n + 6, 7 * n + 12), 'compliance': slice(7 * n + 12, 8 * n + 12),
-            'backlash': slice(8 * n + 12, 9 * n + 12)}
-        self.size = 9 * n + 12
-        names = model.joint_names
-        self.labels = (['dzero:' + j for j in names]
-                       + ['%s:%s' % (k, j) for j in names for k in ('dx', 'dy', 'dz', 'rx', 'ry', 'rz')]
-                       + ['base:%d' % i for i in range(6)] + ['marker:%d' % i for i in range(6)]
-                       + ['compliance:' + j for j in names] + ['backlash:' + j for j in names])
-        # typical magnitudes, for scaling the Jacobian columns
-        self.scale = np.concatenate([np.full(n, 1e-3), np.full(6 * n, 1e-3), np.full(12, 1e-2),
-                                     np.full(n, 2e-4), np.full(n, 1e-3)])
+        j = kinfit.joint_blocks(model.joint_names)
+        super().__init__(model, frame, [
+            ('dzero',) + j['dzero'], ('overlay',) + j['overlay'],
+            ('base', ['base:%d' % i for i in range(6)], np.full(6, 1e-2)),
+            ('marker', ['marker:%d' % i for i in range(6)], np.full(6, 1e-2)),
+            ('compliance',) + j['compliance'], ('backlash',) + j['backlash']])
 
-    def set_geometry(self, x):
-        ov = x[self.sl['overlay']].reshape(self.n, 6)
-        for k, j in enumerate(self.jid):
-            M0 = self.placements0[k]
-            self.model.model.jointPlacements[j] = pin.SE3(M0.rotation @ pin.exp3(ov[k, 3:]),
-                                                           M0.translation + ov[k, :3])
-
-    @staticmethod
-    def se3(tw):
-        return pin.SE3(pin.exp3(np.asarray(tw[:3], float)), np.asarray(tw[3:], float))
+    se3 = staticmethod(kinfit.se3)
 
     def predict(self, x, samples: List[Sample], base0: pin.SE3, marker0: pin.SE3):
         self.set_geometry(x)
         base = base0 * self.se3(x[self.sl['base']])
         marker = marker0 * self.se3(x[self.sl['marker']])
-        c = x[self.sl['compliance']]
-        b = x[self.sl['backlash']]
-        dz = x[self.sl['dzero']]
-        m, d = self.model.model, self.model.data
-        out = []
-        for s in samples:
-            q_link = s.q + dz - c * s.tau - 0.5 * b * np.tanh(s.tau / BACKLASH_EPS)
-            pin.framesForwardKinematics(m, d, self.model._q(q_link))
-            out.append(base * d.oMf[self.fid] * marker)
-        return out
+        return [base * self.frame_pose(self.link_angles(x, s.q, s.tau)) * marker for s in samples]
 
     def residuals(self, x, samples, base0, marker0):
         r = []
@@ -128,28 +90,12 @@ class KinematicFit:
             r.append(ROT_WEIGHT * pin.log3(M.rotation.T @ s.pose.rotation))
         return np.concatenate(r)
 
-    def jacobian(self, x, samples, base0, marker0):
-        r0 = self.residuals(x, samples, base0, marker0)
-        J = np.zeros((len(r0), self.size))
-        for i in range(self.size):
-            h = 1e-3 * self.scale[i]
-            dx = np.zeros(self.size)
-            dx[i] = h
-            J[:, i] = (self.residuals(x + dx, samples, base0, marker0) - r0) / h
-        return J
-
 
 def initial_transforms(fit: KinematicFit, samples: List[Sample]):
     """Base-to-mocap by Kabsch on flange positions, then marker-to-flange in closed form."""
     fit.set_geometry(np.zeros(fit.size))
     F = [fit.model.fk(s.q, fit.frame) for s in samples]
-    A = np.array([f.translation for f in F])
-    B = np.array([s.pose.translation for s in samples])
-    ca, cb = A.mean(axis=0), B.mean(axis=0)
-    U, _, Vt = np.linalg.svd((A - ca).T @ (B - cb))
-    D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
-    R = Vt.T @ D @ U.T
-    base = pin.SE3(R, cb - R @ ca)
+    base = kinfit.kabsch(np.array([f.translation for f in F]), np.array([s.pose.translation for s in samples]))
     Rm = mean_rotation(np.array([(base.rotation @ f.rotation).T @ s.pose.rotation
                                  for f, s in zip(F, samples)]))
     # p_meas = R_b (p_f + R_f t) + t_b  ->  linear in t
@@ -164,51 +110,19 @@ PRIORITY = ('base', 'marker', 'dzero', 'compliance', 'backlash', 'overlay')
 
 def select_parameters(fit: KinematicFit, J: np.ndarray, tol: float = 2e-3):
     """Greedy independent-column selection in PRIORITY order on the scaled
-    Jacobian: a parameter is kept only if it adds a direction the kept ones
-    cannot produce. Returns (kept indices, condition number of the kept set)."""
-    Js = J * fit.scale
-    order = [i for key in PRIORITY for i in range(fit.size)[fit.sl[key]]]
-    basis = np.zeros((Js.shape[0], 0))
-    keep = []
-    for i in order:
-        col = Js[:, i]
-        norm = np.linalg.norm(col)
-        if norm < 1e-12:
-            continue
-        resid = col - basis @ (basis.T @ col)
-        if np.linalg.norm(resid) > tol * norm:
-            keep.append(i)
-            basis = np.hstack([basis, (resid / np.linalg.norm(resid))[:, None]])
-    keep = sorted(keep)
-    Jk = Js[:, keep]
-    Jk = Jk / np.linalg.norm(Jk, axis=0)
-    S = np.linalg.svd(Jk, compute_uv=False)
-    return keep, float(S[0] / S[-1])
+    Jacobian (kinfit.select_parameters). Returns (kept indices, condition
+    number of the kept set)."""
+    return kinfit.select_parameters(fit, J, PRIORITY, tol)
 
 
 def solve(fit: KinematicFit, samples, base0, marker0, keep, x0=None):
-    x0 = np.zeros(fit.size) if x0 is None else x0.copy()
-    keep = np.asarray(keep)
-
-    def f(z):
-        x = x0.copy()
-        x[keep] += z * fit.scale[keep]
-        return fit.residuals(x, samples, base0, marker0)
-
-    sol = levenberg_marquardt(f, np.zeros(len(keep)), max_iter=60)
-    x = x0.copy()
-    x[keep] += sol.x * fit.scale[keep]
-    return x
+    return kinfit.solve(fit, (samples, base0, marker0), keep, x0)
 
 
 def per_pose_mm(fit, x, samples, base0, marker0) -> np.ndarray:
     P = fit.predict(x, samples, base0, marker0)
     return np.array([np.linalg.norm(M.translation - s.pose.translation)
                      for M, s in zip(P, samples)]) * 1e3
-
-
-def rms(v) -> float:
-    return float(np.sqrt(np.mean(np.square(v))))
 
 
 def collect(ctx, poses, mocap, loaded_share=0.5) -> List[Sample]:
@@ -223,16 +137,6 @@ def collect(ctx, poses, mocap, loaded_share=0.5) -> List[Sample]:
     if split < len(poses):
         mount_payload(ctx, None)
     return samples
-
-
-def compose_overlay(old: Optional[dict], names, ov: np.ndarray) -> dict:
-    out = {}
-    for k, n in enumerate(names):
-        o = (old or {}).get(n) or {}
-        dxyz = np.array(o.get('dxyz', [0, 0, 0]), float) + ov[k, :3]
-        R = pin.exp3(np.array(o.get('drot', [0, 0, 0]), float)) @ pin.exp3(ov[k, 3:])
-        out[n] = {'dxyz': dxyz.tolist(), 'drot': pin.log3(R).tolist()}
-    return out
 
 
 def run(ctx: StageContext, n_fit: int = None, n_test: int = None, rounds: int = None) -> StageResult:

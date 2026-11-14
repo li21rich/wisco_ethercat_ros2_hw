@@ -104,3 +104,22 @@ def mount_payload(ctx: StageContext, payload) -> None:
         else:
             input('Hang %.2f kg on %s at %s m, then press Enter '
                   % (payload.mass_kg, payload.link, list(payload.offset_m)))
+
+
+def chain_skip(name: str, client) -> Optional[str]:
+    """`arm all`: the kinematics and repeatability stages that do not apply to
+    this client's measurement source, with the reason (None: run it). With
+    mocap: mocap-calib and mocap-repeat; without: plate and the cube."""
+    if name not in ('plate', 'repeat', 'mocap-calib', 'mocap-repeat'):
+        return None
+    mocap = client.mocap() is not None
+    if mocap and name == 'plate':
+        return 'skipped: mocap present, mocap-calib does the kinematics (run `arm plate` alone to use the plate)'
+    if mocap and name == 'repeat':
+        return 'skipped: mocap present, mocap-repeat measures repeatability'
+    if not mocap and name == 'mocap-calib':
+        return 'skipped: no mocap, the kinematics come from `arm plate`'
+    if not mocap and name == 'mocap-repeat':
+        return ('skipped: no mocap, so no repeatability tuning (it needs a source that sees every pose every '
+                'cycle without an operator); `arm repeat` and `arm validate` measure RP with the indicator cube')
+    return None

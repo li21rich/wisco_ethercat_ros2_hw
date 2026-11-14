@@ -1,8 +1,10 @@
 """`arm <stage> [--sim]`: one command per calibration stage (spec: Calibration procedures).
 
-  arm bringup | indicator | zero | limits | kt | gravity | friction | latency | pivot | pace
-  arm mocap-calib | mocap-repeat | validate
-  arm all --sim                 every stage in order on one sim arm (Phase 0 gate run)
+  arm bringup | indicator | zero | limits | kt | gravity | friction | latency | pivot | plate | pace
+  arm mocap-calib | mocap-repeat | repeat [--indicators] | validate
+  arm all --sim [--no-mocap]    every stage in order on one sim arm (Phase 0 gate run);
+                                with mocap: mocap-calib + mocap-repeat, without: plate +
+                                the indicator cube (repeat, validate)
   arm rig --arm bench01 --serial SN [--model x4_36]
                                 Phase 2 lever rig for one actuator: zero, kt, gravity
                                 (lever COM), friction, latency, stored per serial
@@ -47,12 +49,12 @@ STAGES = [
     ('bringup', 'bringup'), ('indicator', 'indicator'), ('zero', 'zero'), ('limits', 'limits'),
     ('kt', 'torque_constant'),
     ('gravity', 'gravity'), ('friction', 'friction'), ('latency', 'latency'), ('pivot', 'pivot'),
-    ('pace', 'pace'), ('mocap-calib', 'mocap_calib'), ('mocap-repeat', 'mocap_repeat'),
-    ('validate', 'validate'),
+    ('plate', 'plate'), ('pace', 'pace'), ('mocap-calib', 'mocap_calib'), ('mocap-repeat', 'mocap_repeat'),
+    ('repeat', 'repeat'), ('validate', 'validate'),
 ]
 MODULES = dict(STAGES)
 # Stages that need an assembled arm: fewer joints -> SKIP with the reason.
-MIN_JOINTS = {'pivot': 4, 'mocap-calib': 6, 'mocap-repeat': 6, 'validate': 6}
+MIN_JOINTS = {'pivot': 4, 'plate': 6, 'mocap-calib': 6, 'mocap-repeat': 6, 'repeat': 6, 'validate': 6}
 # Phase 2 lever rig, per actuator: zero (lever level), Kt on the hook masses, the lever's
 # COM (friction subtracts its gravity), friction, latency.
 RIG_STAGES = ['zero', 'kt', 'gravity', 'friction', 'latency']
@@ -80,13 +82,16 @@ def make_client(args, arm, calibration):
         # each actuator serial gets its own unit-to-unit errors
         seed = args.seed + (zlib.crc32(args.serial.encode()) % 100000 if args.serial else 0)
         errors = SimErrors.random(arm.n, seed=seed, scale=args.error_scale)
-        return SimArm(arm, calibration, errors, seed=seed)
+        return SimArm(arm, calibration, errors, seed=seed, mocap_enabled=not getattr(args, 'no_mocap', False))
     from .hw.ros_client import RosArmClient
     power_on = None
     if args.powered_at:
         # seconds ago the drives were powered, e.g. --powered-at 1200
         power_on = time.monotonic() - float(args.powered_at)
-    return RosArmClient(arm, calibration, power_on_monotonic=power_on)
+    client = RosArmClient(arm, calibration, power_on_monotonic=power_on)
+    if getattr(args, 'no_mocap', False):
+        client.mocap = lambda: None
+    return client
 
 
 def session_meta(arm, store, calibration, client, operator):
@@ -284,6 +289,9 @@ def main(argv=None) -> int:
     p.add_argument('--repo-id', default='WiscoHumanoidsLab/arm01-teleop')
     p.add_argument('--fps', type=int, default=50)
     p.add_argument('--fresh', action='store_true', help='sim: start from an empty sim calibration store')
+    p.add_argument('--no-mocap', action='store_true',
+                   help='the client reports no mocap (sim: the plate + indicator-cube chain)')
+    p.add_argument('--indicators', action='store_true', help='repeat: measure with the dial-indicator cube')
     args = p.parse_args(argv)
 
     if args.stage == 'status':
@@ -336,12 +344,19 @@ def main(argv=None) -> int:
         from .log.recorder import command_array, load_session
         trajs = [command_array(load_session(path), 'q')['q'] for path in args.replay]
         extra = {'replay_trajectories': trajs, 'replay_dt': client.cmd_dt}
+    if args.stage == 'repeat':
+        extra = {'indicators': args.indicators}
     try:
         if args.stage == 'all':
             if not args.sim:
                 p.error('arm all runs on the sim only; run hardware stages one at a time')
             ok = True
+            from .calib.common import chain_skip, skipped
             for name, _ in STAGES:
+                why = chain_skip(name, client)
+                if why:
+                    print(skipped(name, why).report())
+                    continue
                 r = run_stage(name, args, arm, store, client, recorder)
                 ok &= r.passed
             print('ALL STAGES %s' % ('PASS' if ok else 'had failures'))
