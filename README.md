@@ -256,6 +256,18 @@ Tests: `test/test_arm_law.cpp` (gtest) and `test/arm_stack/` (pytest, same law c
 Python, optimizers, ISO 9283, recorder). The Phase 0 gate (every procedure recovers its
 injected errors in sim) is `ARM_PHASE0_GATE=1 python3 -m pytest test/arm_stack/test_phase0_gate.py`.
 
+Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slave (0x6040/0x6041
+state machine, CSP/CST, 0x6072, a one-joint model, injectable faults, lost frames),
+`Cia402DriveMaster` transcribes the upstream `EcCiA402Drive` per-cycle logic (the package is
+not in the workspace, so it is not linked), and `MockEthercatSystem` is a ros2_control
+`SystemInterface` over both. `test_mock_slave` tests the drive and master logic;
+`test_arm_controller_mock` runs the real `ArmController` and `SafeCommandController` against it
+(enable, fault and reset, CSP/CST switching, the 50 ms watchdog, torque clamps, rejections).
+The mock's guesses about the RMD-X are the `RmdxParams` fields marked "guess".
+`ArmController`'s `drive_feedback` (default off) needs `status_word` (0x6041) and
+`mode_of_operation` (0x6061) state interfaces on each drive joint, which the ros2_control
+block does not export yet.
+
 Assumptions that need the bench (also in the URDF ledger):
 
 - Zeros: J1, J3, J5, J6 and J7 read 0 at the CAD pose; J4 reads 0 with the elbow straight

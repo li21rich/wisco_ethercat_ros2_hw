@@ -169,6 +169,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<double>("watchdog_s", 0.05);
     auto_declare<double>("soft_margin", 0.05);
     auto_declare<double>("blend_s", 0.02);
+    auto_declare<bool>("drive_feedback", false);
     auto_declare<std::string>("calibration_file", "");
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
@@ -216,6 +217,7 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   cfg_.watchdog_s = node->get_parameter("watchdog_s").as_double();
   cfg_.soft_margin = node->get_parameter("soft_margin").as_double();
   blend_s_ = node->get_parameter("blend_s").as_double();
+  drive_feedback_ = node->get_parameter("drive_feedback").as_bool();
 
   std::string urdf = node->get_parameter("robot_description").as_string();
   if (urdf.empty()) {
@@ -239,6 +241,9 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   g_.assign(n, 0.0);
   tau_switch_.assign(n, 0.0);
   q_target_prev_.assign(n, 0.0);
+  q_switch_.assign(n, 0.0);
+  since_ease_.assign(n, 0.0);
+  enabled_.assign(n, true);
   out_.q_target.assign(n, 0.0);
   out_.tau.assign(n, 0.0);
 
@@ -279,8 +284,8 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     state_pub_);
   rt_state_->msg_.data.assign(kStateHeader + kStateBlocks * n, 0.0);
 
-  RCLCPP_INFO(logger, "%zu joints, watchdog %.0f ms; Mode P (CSP) / Mode T (CST)", n,
-    cfg_.watchdog_s * 1e3);
+  RCLCPP_INFO(logger, "%zu joints, watchdog %.0f ms; Mode P (CSP) / Mode T (CST)%s", n,
+    cfg_.watchdog_s * 1e3, drive_feedback_ ? "; drive feedback (0x6041, 0x6061)" : "");
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -301,14 +306,19 @@ controller_interface::InterfaceConfiguration ArmController::state_interface_conf
   for (const char * iface : {"position", "velocity", "effort"}) {
     for (const auto & j : joints_) {config.names.push_back(j + "/" + iface);}
   }
+  if (drive_feedback_) {
+    for (const char * iface : {"status_word", "mode_of_operation"}) {
+      for (const auto & j : joints_) {config.names.push_back(j + "/" + iface);}
+    }
+  }
   return config;
 }
 
 controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lifecycle::State &)
 {
   cmd_pos_.clear(); cmd_eff_.clear(); cmd_off_.clear(); cmd_mode_.clear();
-  st_pos_.clear(); st_vel_.clear(); st_eff_.clear();
-  const bool ok =
+  st_pos_.clear(); st_vel_.clear(); st_eff_.clear(); st_status_.clear(); st_mode_.clear();
+  bool ok =
     controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "position", cmd_pos_) &&
     controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "effort", cmd_eff_) &&
     controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "torque_offset", cmd_off_) &&
@@ -316,6 +326,12 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "position", st_pos_) &&
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "velocity", st_vel_) &&
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "effort", st_eff_);
+  if (ok && drive_feedback_) {
+    ok = controller_interface::get_ordered_interfaces(
+      state_interfaces_, joints_, "status_word", st_status_) &&
+      controller_interface::get_ordered_interfaces(
+      state_interfaces_, joints_, "mode_of_operation", st_mode_);
+  }
   if (!ok) {
     RCLCPP_ERROR(get_node()->get_logger(), "could not get the expected interfaces");
     return controller_interface::CallbackReturn::ERROR;
@@ -331,7 +347,12 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     cmd_mode_[i].get().set_value(arm::kCsp);
   }
   last_mode_ = arm::kModeP;
-  switch_ns_ = steady_now_ns();
+  since_switch_ = 0.0;
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    q_switch_[i] = q_target_prev_[i];
+    since_ease_[i] = 0.0;
+  }
+  std::fill(enabled_.begin(), enabled_.end(), true);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -352,45 +373,89 @@ controller_interface::return_type ArmController::update(
   const rclcpp::Time &, const rclcpp::Duration & period)
 {
   const size_t n = joints_.size();
-  const int64_t now = steady_now_ns();
+  const int64_t now = steady_now_ns();   // command age (the watchdog) only
+  // Blends and eases count control periods, not wall time: the drives step
+  // once per bus cycle, so a late cycle must not skip part of a ramp.
+  const double dt = std::max(period.seconds(), 1e-4);
+  since_switch_ += dt;
   for (size_t i = 0; i < n; ++i) {
+    since_ease_[i] += dt;
     q_[i] = st_pos_[i].get().get_value();
     qd_[i] = st_vel_[i].get().get_value();
     tau_meas_[i] = st_eff_[i].get().get_value();
   }
   gravity_->gravity(q_, g_);
 
+  // A drive that is not OPERATION_ENABLED follows nothing: hold the whole arm
+  // in the fallback until every drive is back.
+  bool all_enabled = true;
+  if (drive_feedback_) {
+    for (size_t i = 0; i < n; ++i) {
+      const double sw = st_status_[i].get().get_value();
+      enabled_[i] = std::isfinite(sw) && (static_cast<uint16_t>(sw) & 0x6F) == 0x27;
+      all_enabled = all_enabled && enabled_[i];
+    }
+  }
+
   static const arm::LawCommand kNone;
   const std::shared_ptr<Command> cmd = *command_buffer_.readFromRT();
   if (cmd) {
     cmd->law.age_s = (now - cmd->received_ns) * 1e-9;
   }
-  arm::compute(cfg_, cmd ? cmd->law : kNone, q_, qd_, g_, out_);
+  arm::compute(cfg_, cmd && all_enabled ? cmd->law : kNone, q_, qd_, g_, out_);
 
   if (out_.mode != last_mode_) {
-    switch_ns_ = now;
+    since_switch_ = 0.0;
     for (size_t i = 0; i < n; ++i) {
       tau_switch_[i] = tau_meas_[i];
       q_target_prev_[i] = q_[i];   // CSP re-entry starts at the actual position
+      q_switch_[i] = q_[i];
+      since_ease_[i] = 0.0;
     }
     last_mode_ = out_.mode;
   }
-  const double since = (now - switch_ns_) * 1e-9;
-  const double dt = std::max(period.seconds(), 1e-4);
   for (size_t i = 0; i < n; ++i) {
-    if (out_.mode == arm::kModeP) {
-      const double target = arm::rate_limit(q_target_prev_[i], out_.q_target[i], cfg_.max_velocity[i] * dt);
+    const bool mode_p = out_.mode == arm::kModeP;
+    const int requested = mode_p ? arm::kCsp : arm::kCst;
+    bool pending = false;   // drive has not confirmed the requested mode yet
+    if (drive_feedback_) {
+      const double shown = st_mode_[i].get().get_value();
+      pending = (shown == arm::kCsp || shown == arm::kCst) && shown != requested;
+    }
+    if (!enabled_[i] || (mode_p && pending)) {
+      // Not following a CSP target yet (disabled, or the master still sends
+      // the actual position as 0x607A): start, and keep restarting, the
+      // ease-in from where the joint is, so it never resumes at a stale target.
+      q_target_prev_[i] = q_[i];
+      q_switch_[i] = q_[i];
+      since_ease_[i] = 0.0;
+    }
+    if (!enabled_[i]) {
+      // Re-enabling goes straight to the law's torque: the measured torque is
+      // 0 while disabled, and blending up from 0 would let the arm drop.
+      tau_switch_[i] = out_.tau[i];
+    }
+    double target = q_[i];   // Mode T: keeps CSP re-entry bumpless
+    double tau = out_.tau[i];
+    if (mode_p) {
+      const double goal =
+        arm::ease_in(q_switch_[i], out_.q_target[i], since_ease_[i], blend_s_);
+      target = arm::rate_limit(q_target_prev_[i], goal, cfg_.max_velocity[i] * dt);
       q_target_prev_[i] = target;
-      cmd_mode_[i].get().set_value(arm::kCsp);
-      cmd_pos_[i].get().set_value(target);
-      cmd_off_[i].get().set_value(out_.tau[i]);
+    } else {
+      tau = arm::blend(tau_switch_[i], out_.tau[i], since_switch_, blend_s_);
+      out_.tau[i] = tau;
+    }
+    // Torque channel: 0x60B2 offset in CSP, 0x6071 target in CST. While a
+    // switch is pending, 0x60B2, which CiA402 adds in both modes, so the
+    // torque is applied whichever mode the drive runs this cycle.
+    cmd_mode_[i].get().set_value(requested);
+    cmd_pos_[i].get().set_value(target);
+    if (requested == arm::kCsp || pending) {
+      cmd_off_[i].get().set_value(tau);
       cmd_eff_[i].get().set_value(0.0);
     } else {
-      const double tau = arm::blend(tau_switch_[i], out_.tau[i], since, blend_s_);
-      out_.tau[i] = tau;
-      cmd_mode_[i].get().set_value(arm::kCst);
       cmd_eff_[i].get().set_value(tau);
-      cmd_pos_[i].get().set_value(q_[i]);      // keeps CSP re-entry bumpless
       cmd_off_[i].get().set_value(0.0);
     }
   }
