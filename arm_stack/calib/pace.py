@@ -114,8 +114,12 @@ def fit(model, arm, logs, generations=60, popsize=14, seed=0, backend='joint', d
             live += 1
             X = o.ask()
             P = m.to_phys(X)
-            q = sim.simulate(k, P)
-            cost = np.mean((q - logs[k].q_meas[None, :]) ** 2, axis=1) / scale[k]
+            # unstable candidates (too little damping for their delay) diverge:
+            # score them as a large finite cost so CMA-ES ranks them last
+            with np.errstate(over='ignore', invalid='ignore'):
+                q = sim.simulate(k, P)
+                cost = np.mean((q - logs[k].q_meas[None, :]) ** 2, axis=1) / scale[k]
+            cost = np.where(np.isfinite(cost), cost, 1e12)
             if first[k] is None:
                 first[k] = float(np.median(cost))
             o.tell(X, cost)
