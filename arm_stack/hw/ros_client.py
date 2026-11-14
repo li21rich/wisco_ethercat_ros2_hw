@@ -3,6 +3,8 @@
   /arm_controller/command  Float64MultiArray, published per send():
       [mode (0 P, 1 T), flags (1 gravity_ff, 2 ignore_soft_limits), friction_ff_gain,
        q[n], qd[n], kp[n], kd[n], tau_ff[n], torque_clamp[n]]   NaN = not set
+      optionally followed by [payload_kg, x, y, z] (point mass in tool0; sticky in the
+      controller, kg <= 0 clears it); sent only when Command.payload is set
   /arm_controller/state    Float64MultiArray, every RT cycle:
       [t, mode, fallback, limit_hit, clamped, q[n], qd[n], tau[n], tau_out[n], q_target[n]]
 
@@ -33,6 +35,7 @@ from .client import ArmClient, Command, JointState
 
 HEADER = 3
 STATE_HEADER = 5
+PAYLOAD_BLOCK = 4
 
 
 def encode_command(cmd: Command, n: int) -> list:
@@ -42,6 +45,10 @@ def encode_command(cmd: Command, n: int) -> list:
     out = [1.0 if cmd.mode == 'T' else 0.0, float(flags), float(cmd.friction_ff_gain)]
     for v in (cmd.q, cmd.qd, cmd.kp, cmd.kd, cmd.tau_ff, cmd.torque_clamp):
         out += block(v)
+    payload = getattr(cmd, 'payload', None)
+    if payload is not None:
+        # optional trailing block; the controller keeps it until the next one
+        out += [float(x) for x in payload][:PAYLOAD_BLOCK]
     return out
 
 

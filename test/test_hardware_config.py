@@ -143,6 +143,17 @@ def test_controller_parameters_use_limits(tmp_path):
         'wisco_ethercat_ros2_hw/SafeCommandController'
 
 
+def test_arm_controller_gets_weighed_link_masses(tmp_path):
+    # the Python ArmModel applies link_masses_kg; the C++ gravity model must see them too
+    hw = make(tmp_path, [{'name': 'a', 'bus_position': 0, 'model': 'x4_10'}])
+    params = hw.arm_controller_parameters({'link_masses_kg': {'l1': 0.82, 'l2': None, 'l3': 1}})
+    assert params['link_mass_names'] == ['l1', 'l3']
+    assert params['link_mass_values'] == [0.82, 1.0]
+    for table in ({'link_masses_kg': {'l1': None}}, {}, None):
+        params = hw.arm_controller_parameters(table)
+        assert 'link_mass_names' not in params and 'link_mass_values' not in params
+
+
 def test_continuous_joint_limits_are_finite_in_parameters(tmp_path):
     hw = make(tmp_path, [{'name': 'c', 'bus_position': 0, 'model': 'x4_10'}])
     params = hw.controller_parameters()

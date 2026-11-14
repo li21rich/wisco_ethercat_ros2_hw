@@ -120,7 +120,15 @@ mocap:
 
 # Optional fixed validation poses (rad, 7 per pose). Empty: feasible random poses.
 validation:
-  iso_poses_rad: []
+  # ISO 9283 poses on the 160 mm dexterous cube from tools/workspace_map.py
+  # (docs/workspace_report.md): one tool orientation, cond 15-44, >= 9 deg from
+  # every joint limit, inside the 60% gravity-torque rule
+  iso_poses_rad:
+    - [-0.6382, 0.7926, -0.8818, 1.6907, 1.3753, 0.4556, -0.6538]
+    - [-0.7324, 1.1009, -0.4689, 0.9683, 0.9153, 0.4260, -1.3491]
+    - [-1.2196, 0.7760, -0.5157, 2.0172, 1.0959, -0.0111, -1.0331]
+    - [-1.2459, 1.6004, -0.8126, 1.9875, 0.5424, -0.3564, -0.7259]
+    - [-0.3077, 1.4662, -0.3803, 0.9205, 0.8930, 0.3902, -0.8733]
 
 # Divot plate for `arm plate`: kinematic calibration without mocap. The probe tip
 # (tool0) is hand guided into each divot in several configurations; the fit uses the

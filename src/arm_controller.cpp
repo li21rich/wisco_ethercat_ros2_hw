@@ -4,147 +4,15 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <map>
 
 #include "controller_interface/helpers.hpp"
-#include "pinocchio/algorithm/model.hpp"
-#include "pinocchio/algorithm/rnea.hpp"
-#include "pinocchio/multibody/data.hpp"
-#include "pinocchio/multibody/model.hpp"
-#include "pinocchio/parsers/urdf.hpp"
-#include "pinocchio/spatial/explog.hpp"
-#include "yaml-cpp/yaml.h"
+#include "wisco_ethercat_ros2_hw/gravity_model.hpp"
 
 namespace wisco_ethercat_ros2_hw
 {
-
-// Gravity torques from the URDF, with the calibration layered on top the same
-// way arm_stack/model/robot.py does it: weighed masses and fitted COMs per
-// link (stage 5) and the mocap kinematic overlay. Joints not driven (the
-// wrist parallelogram's mimic joints) are locked at zero.
-class GravityModel
-{
-public:
-  bool build(
-    const std::string & urdf_xml, const std::vector<std::string> & joints,
-    const std::string & calibration_file, const std::vector<std::string> & mass_links,
-    const std::vector<double> & mass_values, arm::LawConfig & cfg, std::string & error)
-  {
-    pinocchio::Model full;
-    try {
-      pinocchio::urdf::buildModelFromXML(urdf_xml, full);
-    } catch (const std::exception & e) {
-      error = std::string("cannot parse robot_description: ") + e.what();
-      return false;
-    }
-    std::vector<pinocchio::JointIndex> lock;
-    for (pinocchio::JointIndex j = 1; j < static_cast<pinocchio::JointIndex>(full.njoints); ++j) {
-      if (std::find(joints.begin(), joints.end(), full.names[j]) == joints.end()) {
-        lock.push_back(j);
-      }
-    }
-    model_ = lock.empty() ? full :
-      pinocchio::buildReducedModel(full, lock, pinocchio::neutral(full));
-    model_.gravity.linear(Eigen::Vector3d(0, 0, -9.81));
-    for (const auto & name : joints) {
-      if (!model_.existJointName(name)) {
-        error = "joint '" + name + "' is not in robot_description";
-        return false;
-      }
-      const auto id = model_.getJointId(name);
-      jid_.push_back(id);
-      vidx_.push_back(model_.joints[id].idx_v());
-    }
-    if (static_cast<size_t>(model_.nv) != joints.size()) {
-      error = "robot_description has " + std::to_string(model_.nv) + " driven dofs, config lists " +
-        std::to_string(joints.size());
-      return false;
-    }
-    // child link of each joint, for the per-link calibration fields
-    std::map<std::string, pinocchio::JointIndex> link_joint;
-    for (const auto & f : model_.frames) {
-      if (f.type == pinocchio::BODY) {link_joint[f.name] = f.parentJoint;}
-    }
-    auto set_mass = [&](const std::string & link, double mass, const Eigen::Vector3d * com) {
-        auto it = link_joint.find(link);
-        if (it == link_joint.end() || !(mass > 0)) {return;}
-        auto & I = model_.inertias[it->second];
-        const double scale = I.mass() > 0 ? mass / I.mass() : 1.0;
-        I = pinocchio::Inertia(mass, com ? *com : I.lever(), I.inertia().matrix() * scale);
-      };
-    for (size_t k = 0; k < mass_links.size() && k < mass_values.size(); ++k) {
-      if (std::isfinite(mass_values[k])) {set_mass(mass_links[k], mass_values[k], nullptr);}
-    }
-    if (!calibration_file.empty()) {
-      try {
-        const YAML::Node cal = YAML::LoadFile(calibration_file);
-        if (cal["link_inertials"] && cal["link_inertials"].IsMap()) {
-          for (const auto & kv : cal["link_inertials"]) {
-            const auto link = kv.first.as<std::string>();
-            const auto & e = kv.second;
-            const double mass = e["mass_kg"] && !e["mass_kg"].IsNull() ? e["mass_kg"].as<double>() : -1;
-            Eigen::Vector3d com;
-            bool has_com = e["com_m"] && e["com_m"].IsSequence() && e["com_m"].size() == 3;
-            if (has_com) {
-              for (int i = 0; i < 3; ++i) {
-                if (e["com_m"][i].IsNull()) {has_com = false;} else {com[i] = e["com_m"][i].as<double>();}
-              }
-            }
-            auto it = link_joint.find(link);
-            if (it != link_joint.end()) {
-              set_mass(link, mass > 0 ? mass : model_.inertias[it->second].mass(), has_com ? &com : nullptr);
-            }
-          }
-        }
-        if (cal["friction"] && cal["friction"].IsMap()) {
-          for (size_t i = 0; i < joints.size(); ++i) {
-            const auto f = cal["friction"][joints[i]];
-            if (!f) {continue;}
-            if (f["coulomb_nm"] && !f["coulomb_nm"].IsNull()) {cfg.coulomb[i] = f["coulomb_nm"].as<double>();}
-            if (f["viscous_nm_s_per_rad"] && !f["viscous_nm_s_per_rad"].IsNull()) {
-              cfg.viscous[i] = f["viscous_nm_s_per_rad"].as<double>();
-            }
-          }
-        }
-        if (cal["kinematic_overlay"] && cal["kinematic_overlay"].IsMap()) {
-          for (size_t i = 0; i < joints.size(); ++i) {
-            const auto o = cal["kinematic_overlay"][joints[i]];
-            if (!o) {continue;}
-            Eigen::Vector3d dxyz = Eigen::Vector3d::Zero(), drot = Eigen::Vector3d::Zero();
-            for (int a = 0; a < 3; ++a) {
-              if (o["dxyz"] && o["dxyz"].size() == 3) {dxyz[a] = o["dxyz"][a].as<double>();}
-              if (o["drot"] && o["drot"].size() == 3) {drot[a] = o["drot"][a].as<double>();}
-            }
-            auto & M = model_.jointPlacements[jid_[i]];
-            M = pinocchio::SE3(M.rotation() * pinocchio::exp3(drot), M.translation() + dxyz);
-          }
-        }
-      } catch (const std::exception & e) {
-        error = "cannot read calibration file '" + calibration_file + "': " + e.what();
-        return false;
-      }
-    }
-    data_ = std::make_unique<pinocchio::Data>(model_);
-    q_ = pinocchio::neutral(model_);
-    return true;
-  }
-
-  // Not allocating: q_ and data_ are preallocated.
-  void gravity(const std::vector<double> & q, std::vector<double> & g)
-  {
-    for (size_t i = 0; i < jid_.size(); ++i) {q_[model_.joints[jid_[i]].idx_q()] = q[i];}
-    const auto & tau = pinocchio::computeGeneralizedGravity(model_, *data_, q_);
-    for (size_t i = 0; i < vidx_.size(); ++i) {g[i] = tau[vidx_[i]];}
-  }
-
-private:
-  pinocchio::Model model_;
-  std::unique_ptr<pinocchio::Data> data_;
-  Eigen::VectorXd q_;
-  std::vector<pinocchio::JointIndex> jid_;
-  std::vector<int> vidx_;
-};
 
 ArmController::ArmController() = default;
 ArmController::~ArmController() = default;
@@ -175,6 +43,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
     auto_declare<std::vector<double>>("link_mass_values", std::vector<double>{});
+    auto_declare<std::string>("payload_frame", "tool0");
   } catch (const std::exception & e) {
     std::fprintf(stderr, "ArmController: exception in on_init: %s\n", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -236,6 +105,12 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     RCLCPP_ERROR(logger, "%s", error.c_str());
     return controller_interface::CallbackReturn::ERROR;
   }
+  const std::string payload_frame = node->get_parameter("payload_frame").as_string();
+  payload_ok_ = gravity_->set_payload_frame(payload_frame);
+  if (!payload_ok_) {
+    RCLCPP_WARN(logger, "payload_frame '%s' is not in robot_description: payload blocks are ignored",
+      payload_frame.c_str());
+  }
 
   q_.assign(n, 0.0);
   qd_.assign(n, 0.0);
@@ -253,10 +128,11 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   subscription_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
     "~/command", rclcpp::SystemDefaultsQoS(),
     [this, n, expected](const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-      if (msg->data.size() != expected) {
+      if (msg->data.size() != expected && msg->data.size() != expected + kPayloadBlock) {
         RCLCPP_WARN_THROTTLE(
           get_node()->get_logger(), *get_node()->get_clock(), 2000,
-          "ignoring command with %zu values; expected %zu", msg->data.size(), expected);
+          "ignoring command with %zu values; expected %zu (or %zu with a payload)", msg->data.size(),
+          expected, expected + kPayloadBlock);
         return;
       }
       auto c = std::make_shared<Command>();
@@ -277,6 +153,12 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
       c->law.kd = block(3);
       c->law.tau_ff = block(4);
       c->law.torque_clamp = block(5);
+      if (d.size() == expected + kPayloadBlock && std::isfinite(d[expected])) {
+        c->has_payload = true;
+        for (size_t k = 0; k < kPayloadBlock; ++k) {
+          c->payload[k] = std::isfinite(d[expected + k]) ? d[expected + k] : 0.0;
+        }
+      }
       c->received_ns = steady_now_ns();
       command_buffer_.writeFromNonRT(c);
     });
@@ -362,6 +244,8 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     since_ease_[i] = 0.0;
   }
   std::fill(enabled_.begin(), enabled_.end(), true);
+  std::fill(std::begin(payload_), std::end(payload_), 0.0);
+  gravity_->set_payload(0.0, 0.0, 0.0, 0.0);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -393,7 +277,6 @@ controller_interface::return_type ArmController::update(
     qd_[i] = st_vel_[i].get().get_value();
     tau_meas_[i] = st_eff_[i].get().get_value();
   }
-  gravity_->gravity(q_, g_);
 
   // A drive that is not OPERATION_ENABLED follows nothing: hold the whole arm
   // in the fallback until every drive is back.
@@ -410,7 +293,16 @@ controller_interface::return_type ArmController::update(
   const std::shared_ptr<Command> cmd = *command_buffer_.readFromRT();
   if (cmd) {
     cmd->law.age_s = (now - cmd->received_ns) * 1e-9;
+    // the payload is sticky: kept after the command goes stale (the watchdog
+    // fallback still carries it) and by later commands without the block
+    if (cmd->has_payload && payload_ok_ &&
+      !std::equal(std::begin(payload_), std::end(payload_), std::begin(cmd->payload)))
+    {
+      std::copy(std::begin(cmd->payload), std::end(cmd->payload), std::begin(payload_));
+      gravity_->set_payload(payload_[0], payload_[1], payload_[2], payload_[3]);
+    }
   }
+  gravity_->gravity(q_, g_);
   arm::compute(cfg_, cmd && all_enabled ? cmd->law : kNone, q_, qd_, g_, out_);
 
   if (out_.mode != last_mode_) {

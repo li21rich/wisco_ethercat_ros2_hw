@@ -317,7 +317,7 @@ class HardwareConfig:
         arm_config = arm_config or {}
         rows = {r['name']: r for r in arm_config.get('joints') or []}
         gains = [rows.get(j.name, {}).get('gains') or {} for j in self.joints]
-        return {
+        params = {
             'joints': [j.name for j in self.joints],
             'max_torque': [float(rows.get(j.name, {}).get('max_torque_nm') or j.max_effort)
                            for j in self.joints],
@@ -333,6 +333,16 @@ class HardwareConfig:
             'write_max_torque': True,
             'calibration_file': calibration_file or '',
         }
+        # Weighed link masses: the Python model (sim, calibration) applies them
+        # under the calibration's link_inertials, so the controller's gravity
+        # model must too. Nulls (not weighed yet) keep the URDF mass; ROS
+        # parameter files cannot hold an empty list, so omit the pair then.
+        masses = {k: float(v) for k, v in (arm_config.get('link_masses_kg') or {}).items()
+                  if v is not None}
+        if masses:
+            params['link_mass_names'] = list(masses)
+            params['link_mass_values'] = list(masses.values())
+        return params
 
     def controller_parameters(self, command_timeout=0.1, soft_margin=0.1):
         """ros__parameters for the SafeCommandController."""

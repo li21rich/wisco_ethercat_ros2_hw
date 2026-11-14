@@ -28,7 +28,7 @@ ament_target_dependencies(wisco_ethercat_ros2_hw_controllers
   std_msgs)
 
 # --- ArmController: the arm's 1 kHz Mode P / Mode T loop (arm_law.hpp + Pinocchio gravity) ---
-add_library(wisco_ethercat_ros2_hw_arm_controller SHARED src/arm_controller.cpp)
+add_library(wisco_ethercat_ros2_hw_arm_controller SHARED src/arm_controller.cpp src/gravity_model.cpp)
 target_compile_features(wisco_ethercat_ros2_hw_arm_controller PUBLIC cxx_std_17)
 target_include_directories(wisco_ethercat_ros2_hw_arm_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -107,6 +107,13 @@ if(BUILD_TESTING)
     wisco_mock_ethercat wisco_ethercat_ros2_hw_arm_controller wisco_ethercat_ros2_hw_controllers)
   ament_target_dependencies(test_arm_controller_mock
     controller_interface hardware_interface rclcpp rclcpp_lifecycle std_msgs)
+
+  # C++ GravityModel (the controller's) against the Python ArmModel (sim,
+  # calibration): golden file written by tools/make_parity_golden.py.
+  ament_add_gtest(test_gravity_parity test/test_gravity_parity.cpp)
+  target_link_libraries(test_gravity_parity wisco_ethercat_ros2_hw_arm_controller yaml-cpp)
+  target_compile_definitions(test_gravity_parity PRIVATE
+    WISCO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
   ament_add_pytest_test(test_arm_stack test/arm_stack
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} TIMEOUT 900)

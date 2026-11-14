@@ -48,7 +48,9 @@ class ArmModel:
         self.velocity_limit = np.array([self.nominal.velocityLimit[i] for i in self.vidx])
         self.coulomb = np.zeros(len(self.joint_names))
         self.viscous = np.zeros(len(self.joint_names))
-        self.model = self.nominal
+        # a copy: calibration layers edit self.model and read the nominal values,
+        # so applying a calibration twice must not compound
+        self.model = self.nominal.copy()
         self.data = self.model.createData()
         self.overlay = None
 
@@ -175,6 +177,17 @@ class ArmModel:
             if stay_inside:
                 q = np.clip(q, self.lower, self.upper)
         return q
+
+    def ik(self, target, q_seed: Sequence[float], method: str = 'clik', **opts):
+        """6-DOF (or masked) IK of the tool frame; thin wrapper over arm_stack.model.ik.solve.
+
+        target: pin.SE3, a 4x4 matrix, or a 3-vector (position only).
+        method: 'clik' (default, null-space posture), 'lm', 'dls' or 'multistart'.
+        Returns an ik.IKResult (q, success, pos_err, rot_err, iters, time); q is
+        always inside the joint limits.
+        """
+        from . import ik as _ik
+        return _ik.solve(self, target, q_seed, method=method, **opts)
 
     # ------------------------------------------------------------------ dynamics
     def gravity(self, q: Sequence[float]) -> np.ndarray:
