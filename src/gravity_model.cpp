@@ -51,10 +51,18 @@ bool GravityModel::build(
       std::to_string(joints.size());
     return false;
   }
-  // child link of each joint, for the per-link calibration fields
+  // child link of each driven joint, for the per-link calibration fields. As
+  // ArmModel.link_names(): the joint's first body frame. Bodies merged in from
+  // locked joints (the wrist crank and rod, on link5's joint) have no entry:
+  // their mass is part of link5's, which stage 5 fits as a whole.
   std::map<std::string, pinocchio::JointIndex> link_joint;
-  for (const auto & f : model_.frames) {
-    if (f.type == pinocchio::BODY) {link_joint[f.name] = f.parentJoint;}
+  for (const auto id : jid_) {
+    for (const auto & f : model_.frames) {
+      if (f.type == pinocchio::BODY && f.parentJoint == id) {
+        link_joint[f.name] = id;
+        break;
+      }
+    }
   }
   auto set_mass = [&](const std::string & link, double mass, const Eigen::Vector3d * com) {
       auto it = link_joint.find(link);
