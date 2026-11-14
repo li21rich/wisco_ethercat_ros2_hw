@@ -170,7 +170,9 @@ def run(ctx: StageContext, backend: str = 'joint') -> StageResult:
                          name, p['armature'], p['coulomb'], p['viscous'], p['encoder_bias'] / DEG,
                          p['delay_s'] * 1e3, p['drive_kp'], p['drive_kd'], log.freq[1], f['rms_rad'] / DEG,
                          100 * f['rms_rad'] / amp,
-                         ('' if good else ('  <-- did not converge' if not f['converged'] else '  <-- FAIL (rms)')))
+                         '' if good else ('  <-- did not converge' if not f['converged'] else '  <-- FAIL (rms)')))
+    if not delays:      # no chirp reached the bus-rate band: use every joint
+        delays = [f['params']['delay_s'] for f in fits]
     delay = float(np.median(delays))
     latency = ctx.calibration.get('latency_ms')
     if latency is None:
