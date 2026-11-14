@@ -95,9 +95,13 @@ private:
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> state_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>> rt_state_;
 
-  std::vector<Ref> cmd_pos_, cmd_eff_, cmd_off_, cmd_mode_;
+  std::vector<Ref> cmd_pos_, cmd_eff_, cmd_off_, cmd_mode_, cmd_max_;
   std::vector<StateRef> st_pos_, st_vel_, st_eff_, st_status_, st_mode_;
   bool drive_feedback_ = false;
+  // write_max_torque (parameter, default false): also claims <joint>/max_torque
+  // (0x6072) and writes the command's torque clamp there, so the drive's CSP
+  // loop cannot exceed it. Needs 0x6072 mapped as a command interface.
+  bool write_max_torque_ = false;
 
   // preallocated per-cycle buffers
   std::vector<double> q_, qd_, tau_meas_, g_, tau_switch_, q_target_prev_;

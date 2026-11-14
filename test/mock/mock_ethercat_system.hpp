@@ -23,7 +23,8 @@
 // Per joint it exports state interfaces position, velocity, effort,
 // mode_of_operation (0x6061), status_word (0x6041), error_code (0x603F) and
 // command interfaces position, velocity, effort, torque_offset,
-// mode_of_operation, reset_fault.
+// mode_of_operation, reset_fault, max_torque (0x6072, N m; unwritten = the
+// slave-config default).
 #ifndef WISCO_ETHERCAT_ROS2_HW__MOCK__MOCK_ETHERCAT_SYSTEM_HPP_
 #define WISCO_ETHERCAT_ROS2_HW__MOCK__MOCK_ETHERCAT_SYSTEM_HPP_
 

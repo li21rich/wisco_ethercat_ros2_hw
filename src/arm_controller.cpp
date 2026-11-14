@@ -170,6 +170,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<double>("soft_margin", 0.05);
     auto_declare<double>("blend_s", 0.02);
     auto_declare<bool>("drive_feedback", false);
+    auto_declare<bool>("write_max_torque", false);
     auto_declare<std::string>("calibration_file", "");
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
@@ -218,6 +219,7 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   cfg_.soft_margin = node->get_parameter("soft_margin").as_double();
   blend_s_ = node->get_parameter("blend_s").as_double();
   drive_feedback_ = node->get_parameter("drive_feedback").as_bool();
+  write_max_torque_ = node->get_parameter("write_max_torque").as_bool();
 
   std::string urdf = node->get_parameter("robot_description").as_string();
   if (urdf.empty()) {
@@ -296,6 +298,9 @@ controller_interface::InterfaceConfiguration ArmController::command_interface_co
   for (const char * iface : {"position", "effort", "torque_offset", "mode_of_operation"}) {
     for (const auto & j : joints_) {config.names.push_back(j + "/" + iface);}
   }
+  if (write_max_torque_) {
+    for (const auto & j : joints_) {config.names.push_back(j + "/max_torque");}
+  }
   return config;
 }
 
@@ -316,7 +321,7 @@ controller_interface::InterfaceConfiguration ArmController::state_interface_conf
 
 controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lifecycle::State &)
 {
-  cmd_pos_.clear(); cmd_eff_.clear(); cmd_off_.clear(); cmd_mode_.clear();
+  cmd_pos_.clear(); cmd_eff_.clear(); cmd_off_.clear(); cmd_mode_.clear(); cmd_max_.clear();
   st_pos_.clear(); st_vel_.clear(); st_eff_.clear(); st_status_.clear(); st_mode_.clear();
   bool ok =
     controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "position", cmd_pos_) &&
@@ -326,6 +331,9 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "position", st_pos_) &&
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "velocity", st_vel_) &&
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "effort", st_eff_);
+  if (ok && write_max_torque_) {
+    ok = controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "max_torque", cmd_max_);
+  }
   if (ok && drive_feedback_) {
     ok = controller_interface::get_ordered_interfaces(
       state_interfaces_, joints_, "status_word", st_status_) &&
@@ -345,6 +353,7 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     cmd_eff_[i].get().set_value(0.0);
     cmd_off_[i].get().set_value(0.0);
     cmd_mode_[i].get().set_value(arm::kCsp);
+    if (write_max_torque_) {cmd_max_[i].get().set_value(cfg_.max_torque[i]);}
   }
   last_mode_ = arm::kModeP;
   since_switch_ = 0.0;
@@ -451,6 +460,18 @@ controller_interface::return_type ArmController::update(
     // torque is applied whichever mode the drive runs this cycle.
     cmd_mode_[i].get().set_value(requested);
     cmd_pos_[i].get().set_value(target);
+    if (write_max_torque_) {
+      // 0x6072 caps the drive's TOTAL torque, so in CSP the drive's own
+      // position loop is held to the command's clamp too (a limit search
+      // pushing into a hard stop). The fallback uses the configured max.
+      double cap = cfg_.max_torque[i];
+      if (cmd && !out_.fallback && i < cmd->law.torque_clamp.size() &&
+        std::isfinite(cmd->law.torque_clamp[i]))
+      {
+        cap = std::min(cap, std::fabs(cmd->law.torque_clamp[i]));
+      }
+      cmd_max_[i].get().set_value(cap);
+    }
     if (requested == arm::kCsp || pending) {
       cmd_off_[i].get().set_value(tau);
       cmd_eff_[i].get().set_value(0.0);

@@ -27,10 +27,12 @@ CONTROL_MODES = {
     # The arm stack's Mode P / Mode T (spec: Hardware assumptions): starts in
     # CSP (8); the ArmController switches 0x6060 to CST (10) at runtime. Each
     # joint exports position (0x607A), effort (0x6071), torque_offset (0x60B2,
-    # gravity + friction feedforward in CSP) and mode_of_operation (0x6060).
+    # gravity + friction feedforward in CSP), mode_of_operation (0x6060) and
+    # max_torque (0x6072, the command's torque clamp, which caps the drive's
+    # own CSP loop too).
     'arm': (8, 'arm'),
 }
-ARM_COMMAND_INTERFACES = ['position', 'effort', 'torque_offset', 'mode_of_operation']
+ARM_COMMAND_INTERFACES = ['position', 'effort', 'torque_offset', 'mode_of_operation', 'max_torque']
 
 MOVABLE_JOINT_TYPES = ('revolute', 'continuous', 'prismatic')
 
@@ -256,6 +258,11 @@ class HardwareConfig:
                         ch['command_interface'] = 'effort'
                 elif index == 0x6072:
                     ch['default'] = joint.max_torque_permille
+                    if arm:
+                        # the ArmController writes the command's torque clamp here
+                        # a magnitude: no direction sign
+                        ch['factor'] = abs(joint.effort_command())
+                        ch['command_interface'] = 'max_torque'
                 elif index == 0x6060:
                     ch['default'] = self.mode_of_operation
                     if arm:
@@ -323,6 +330,7 @@ class HardwareConfig:
             'kd_fallback': [max(float(g.get('kd', 0.0)), j.damping)
                             for g, j in zip(gains, self.joints)],
             'watchdog_s': 0.05,
+            'write_max_torque': True,
             'calibration_file': calibration_file or '',
         }
 

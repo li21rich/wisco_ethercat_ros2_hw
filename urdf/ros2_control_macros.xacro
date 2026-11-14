@@ -26,7 +26,7 @@
   <xacro:property name="hw_names" value="${[j['name'] for j in hw_joints]}"/>
   <xacro:property name="use_mock_hardware" value="${bool(hw.get('use_mock_hardware', False))}"/>
   <xacro:property name="command_interface" value="${hw.get('command_interface', 'velocity')}"/>
-  <!-- arm mode exports several per joint (position, effort, torque_offset, mode_of_operation) -->
+  <!-- arm mode exports several per joint (position, effort, torque_offset, mode_of_operation, max_torque) -->
   <xacro:property name="command_interfaces" value="${hw.get('command_interfaces', [command_interface])}"/>
   <xacro:property name="mode_of_operation" value="${hw.get('mode_of_operation', 9)}"/>
   <xacro:property name="control_frequency" value="${hw.get('control_frequency', 100.0)}"/>

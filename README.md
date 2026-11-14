@@ -279,6 +279,10 @@ Assumptions that need the bench (also in the URDF ledger):
   mimic joints; only `wrist_pitch` is driven.
 - Link masses come from CAD volumes with placeholder densities until the weighed values
   land in `link_masses_kg`.
+- The ArmController writes each command's torque clamp to 0x6072 (`max_torque` command
+  interface, `write_max_torque: true` in arm mode), so the drive's own CSP loop is capped
+  too, which matters when `arm limits` pushes into a hard stop. That 0x6072 is writable
+  cyclically in the RxPDO on the RMD-X is a bench check, like 0x60B2.
 - 0x60B2 (torque offset) in the CSP PDO map is not confirmed on the RMD-X drives; without it
   Mode P loses its gravity feedforward. CSP gains being settable over SDO is also
   unconfirmed (`mocap-repeat` leaves Kp/Kd out of its tuning if not).

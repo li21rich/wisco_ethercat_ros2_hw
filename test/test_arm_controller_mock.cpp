@@ -94,9 +94,10 @@ std::vector<JointSpec> arm_joints()
   return {j1, j2};
 }
 
-std::vector<rclcpp::Parameter> arm_params(bool drive_feedback)
+std::vector<rclcpp::Parameter> arm_params(bool drive_feedback, bool write_max_torque = false)
 {
   return {
+    rclcpp::Parameter("write_max_torque", write_max_torque),
     rclcpp::Parameter("joints", std::vector<std::string>{"j1", "j2"}),
     rclcpp::Parameter("max_torque", kMaxTorque),
     rclcpp::Parameter("max_velocity", std::vector<double>{2.0, 2.0}),
@@ -159,7 +160,7 @@ struct Arm
 // before the first frame instead.
 Arm make_arm(
   bool drive_feedback, int mode_switch_delay = 0, bool start_bus = true,
-  bool holding_brake = false)
+  bool holding_brake = false, bool write_max_torque = false)
 {
   Arm a;
   a.h = std::make_unique<ControllerHarness>(
@@ -174,7 +175,7 @@ Arm make_arm(
     EXPECT_TRUE(all_enabled(*a.h));
   }
   a.c = std::make_shared<ArmController>();
-  EXPECT_TRUE(a.h->load(a.c, "arm_controller", arm_params(drive_feedback), "/command"));
+  EXPECT_TRUE(a.h->load(a.c, "arm_controller", arm_params(drive_feedback, write_max_torque), "/command"));
   return a;
 }
 
@@ -392,6 +393,38 @@ TEST_F(ArmMock, TorqueClampHonoured)
   a.h->stream(command(kModeP, q0, {0.0, 10.0}, {kNaN, 0.8}));
   a.h->cycle(5);
   EXPECT_NEAR(a.cmd(1).torque_offset, 0.8, 1e-9);
+}
+
+// --------------------------------------------------------------------------
+// write_max_torque: the command's clamp goes to 0x6072, so in CSP the drive's
+// own position loop (not just the 0x60B2 offset) is held to it. j2 holds
+// ~0.98 Nm of gravity at q0; with a 0.3 Nm clamp the drive saturates at 0.3.
+TEST_F(ArmMock, MaxTorqueFollowsCommandClampInCsp)
+{
+  Arm a = make_arm(false, 0, true, false, true);
+  const std::vector<double> q0 = {0.2, -0.3};
+  a.h->stream(command(kModeP, q0));
+  a.h->cycle(100);
+  EXPECT_NEAR(a.cmd(1).max_torque, kMaxTorque[1], 1e-9);        // no clamp: configured max
+  EXPECT_NEAR(std::fabs(a.tau(1)), std::fabs(gravity_at(q0)[1]), 0.1);
+
+  a.h->stream(command(kModeP, q0, {0.0, 0.0}, {kNaN, 0.3}));
+  a.h->cycle(6);   // the new command reaches the controller, then the drive over the bus
+  double peak = 0.0;
+  for (int k = 0; k < 150; ++k) {
+    a.h->cycle();
+    peak = std::max(peak, std::fabs(a.tau(1)));
+    EXPECT_LE(std::fabs(a.tau(1)), 0.3 + 0.015) << "cycle " << k;
+  }
+  EXPECT_NEAR(a.cmd(1).max_torque, 0.3, 1e-9);
+  EXPECT_EQ(a.h->hw().master(1).rx().max_torque, 20);   // 0.3 Nm / 0.015 Nm per mille
+  EXPECT_GT(peak, 0.28) << "the cap never bound";
+  EXPECT_NEAR(a.cmd(0).max_torque, kMaxTorque[0], 1e-9);        // j1 unclamped
+
+  // watchdog fallback: back to the configured max
+  a.h->stop_stream();
+  a.h->cycle(100);
+  EXPECT_NEAR(a.cmd(1).max_torque, kMaxTorque[1], 1e-9);
 }
 
 // --------------------------------------------------------------------------

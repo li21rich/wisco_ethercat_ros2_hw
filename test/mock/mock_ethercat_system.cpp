@@ -92,6 +92,7 @@ std::vector<hardware_interface::CommandInterface> MockEthercatSystem::export_com
     out.emplace_back(j, "torque_offset", &c.torque_offset);
     out.emplace_back(j, "mode_of_operation", &c.mode_of_operation);
     out.emplace_back(j, "reset_fault", &c.reset_fault);
+    out.emplace_back(j, "max_torque", &c.max_torque);
   }
   return out;
 }
