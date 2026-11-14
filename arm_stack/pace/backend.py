@@ -41,14 +41,30 @@ class JointLog:
 
 
 class JointReplayBackend:
+    """Per-joint replay. With `hold_gains` (the drives' CSP kp, kd for every joint)
+    the other joints are simulated too, held by their drive loops, through the arm's
+    mass matrix at the hold pose: the chirped joint drags them (and they it), which
+    a one-joint model cannot show and which otherwise ends up in a biased armature
+    and viscous fit. The chirp is small, so inertia is constant and gravity is the
+    chirped joint's exact curve plus a linear term in the others' deflection."""
 
-    def __init__(self, model, logs: List[JointLog], gravity_ff: bool = True, substeps: int = 1):
+    def __init__(self, model, logs: List[JointLog], gravity_ff: bool = True, substeps: int = 1,
+                 hold_gains=None, hold_armature=None):
         self.model = model
         self.logs = logs
         self.gravity_ff = gravity_ff
         self.substeps = substeps
+        self.coupled = hold_gains is not None
+        n = len(logs[0].q_hold) if logs else 0
+        self.kp_hold = None if hold_gains is None else np.asarray(hold_gains[0], float)
+        self.kd_hold = None if hold_gains is None else np.asarray(hold_gains[1], float)
+        arm0 = np.zeros(n) if hold_armature is None else np.asarray(hold_armature, float)
         self.inertia = []
         self.g_grid = []
+        self.M0 = []          # mass matrix at the hold pose, others' armature on the diagonal
+        self.G = []           # d gravity / d q at the hold pose
+        self.sub_k = []       # substeps per log (coupled)
+        self.g_vec_grid = []  # full gravity vector along the chirped joint's sweep
         for log in logs:
             j = log.joint
             M = model.mass_matrix(log.q_hold)
@@ -56,16 +72,38 @@ class JointReplayBackend:
             lo = min(log.q_meas.min(), log.q_cmd.min()) - 0.2
             hi = max(log.q_meas.max(), log.q_cmd.max()) + 0.2
             grid = np.linspace(lo, hi, 121)
-            g = []
+            gv = []
             for v in grid:
                 q = log.q_hold.copy()
                 q[j] = v
-                g.append(model.gravity(q)[j])
-            self.g_grid.append((grid, np.array(g)))
+                gv.append(model.gravity(q))
+            gv = np.array(gv)
+            self.g_grid.append((grid, gv[:, j]))
+            self.g_vec_grid.append(gv)
+            if self.coupled:
+                Ma = M + np.diag(np.where(np.arange(n) == j, 0.0, arm0))
+                self.M0.append(Ma)
+                h = 1e-5
+                G = np.zeros((n, n))
+                for k in range(n):
+                    qp, qm = log.q_hold.copy(), log.q_hold.copy()
+                    qp[k] += h
+                    qm[k] -= h
+                    G[:, k] = (model.gravity(qp) - model.gravity(qm)) / (2 * h)
+                self.G.append(G)
+                # explicit stepping: keep the stiffest and the most damped mode well
+                # inside stability (the chirped joint at zero candidate armature is
+                # the worst case)
+                w = float(np.sqrt(np.max(np.abs(np.linalg.eigvals(np.linalg.solve(Ma, np.diag(self.kp_hold)))))))
+                c = float(np.max(np.abs(np.linalg.eigvals(np.linalg.solve(Ma, np.diag(self.kd_hold))))))
+                self.sub_k.append(max(substeps, int(np.ceil(max(w, c) * log.dt / 0.5))))
         self.friction_ff = [(model.coulomb[l.joint], model.viscous[l.joint]) for l in logs]
+        self.fric_all = (np.asarray(model.coulomb, float), np.asarray(model.viscous, float))
 
     def simulate(self, k: int, P: np.ndarray) -> np.ndarray:
         """Replay log k for a population P (pop x 7, PARAMS order); returns q (pop x T)."""
+        if self.coupled:
+            return self._simulate_coupled(k, P)
         log = self.logs[k]
         arm, fc, fv, bias, delay, kp, kd = [P[:, i] for i in range(7)]
         pop = len(P)
@@ -97,6 +135,64 @@ class JointReplayBackend:
                 qd = qd + h * qdd
                 q = q + h * qd
             out[:, t] = q + bias
+        return out
+
+
+    def _simulate_coupled(self, k: int, P: np.ndarray) -> np.ndarray:
+        log = self.logs[k]
+        j = log.joint
+        arm, fc, fv, bias, delay, kp, kd = [P[:, i] for i in range(7)]
+        pop = len(P)
+        T = len(log.q_cmd)
+        dt = log.dt
+        grid, gj = self.g_grid[k]
+        gv = self.g_vec_grid[k]
+        n = gv.shape[1]
+        hold = log.q_hold
+        others = np.arange(n) != j
+        M0 = self.M0[k]
+        Minv0 = np.linalg.inv(M0)
+        G = self.G[k]
+        # (M0 + a e_j e_j^T)^-1 per candidate, Sherman-Morrison
+        u = Minv0[:, j]
+        denom = 1.0 + arm * Minv0[j, j]
+        Minv = Minv0[None] - (arm / denom)[:, None, None] * np.einsum('i,k->ik', u, u)[None]
+        fc0, fv0 = self.friction_ff[k]
+        Fc, Fv = self.fric_all
+        kp_h, kd_h = self.kp_hold, self.kd_hold
+        tgrid = np.arange(T) * dt
+        q = np.repeat(hold[None], pop, axis=0)
+        q[:, j] = log.q_meas[0]
+        qd = np.zeros((pop, n))
+        out = np.empty((pop, T))
+        sub = self.sub_k[k]
+        h = dt / sub
+        gcols = [gv[:, c] for c in range(n)]
+        for t in range(T):
+            ts = tgrid[t] - delay
+            qc = np.interp(ts, tgrid, log.q_cmd)
+            qdc = np.interp(ts, tgrid, log.qd_cmd)
+            q_sent = np.interp(ts, tgrid, log.q_meas)
+            # feedforward the host sent: gravity at the measured pose (others ~ at hold)
+            if self.gravity_ff:
+                ff = np.stack([np.interp(q_sent, grid, gcols[c]) for c in range(n)], axis=1)
+            else:
+                ff = np.zeros((pop, n))
+            ff[:, j] += fc0 * np.tanh(qdc / 0.02) + fv0 * qdc
+            for _ in range(sub):
+                g_true = np.stack([np.interp(q[:, j], grid, gcols[c]) for c in range(n)], axis=1)
+                dqo = np.where(others[None], q - hold[None], 0.0)
+                g_true = g_true + dqo @ G.T
+                tau = ff.copy()
+                tau[:, j] += kp * (qc - (q[:, j] + bias)) - kd * qd[:, j]
+                tau[:, others] += kp_h[others] * (hold[others] - q[:, others]) - kd_h[others] * qd[:, others]
+                fr = np.empty_like(qd)
+                fr[:, others] = Fc[others] * np.tanh(qd[:, others] / 0.01) + Fv[others] * qd[:, others]
+                fr[:, j] = fc * np.tanh(qd[:, j] / 0.01) + fv * qd[:, j]
+                qdd = np.einsum('pik,pk->pi', Minv, tau - g_true - fr)
+                qd = qd + h * qdd
+                q = q + h * qd
+            out[:, t] = q[:, j] + bias
         return out
 
 

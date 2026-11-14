@@ -90,8 +90,10 @@ def fit_offsets(model, Q: np.ndarray, iters: int = 30, rank_tol: float = 1e-3,
     return d, p, observability, rms
 
 
-def sim_divot_poses(ctx: StageContext, count: int, divot: Optional[np.ndarray] = None):
-    """Sim 'operator': varied true configurations with the true tip on the divot."""
+def sim_divot_poses(ctx: StageContext, count: int, divot: Optional[np.ndarray] = None, accept=None):
+    """Sim 'operator': varied true configurations with the true tip on the divot.
+    accept(q) -> bool, if given, rejects configurations the setup cannot reach
+    (the plate stage keeps the probe inside a cone about the plate normal)."""
     sim = ctx.client
     truth = sim.truth
     home = safe_home(truth)
@@ -112,6 +114,8 @@ def sim_divot_poses(ctx: StageContext, count: int, divot: Optional[np.ndarray] =
         if np.linalg.norm(truth.tool_position(q) - divot) > 1e-5:
             continue
         if np.any(q < lo) or np.any(q > hi):
+            continue
+        if accept is not None and not accept(q):
             continue
         if poses and min(np.max(np.abs(q - p)) for p in poses) < 12 * DEG:
             continue          # want varied configurations, not repeats
