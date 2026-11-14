@@ -14,6 +14,8 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(pinocchio REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # --- SafeCommandController: the command controller the launch file loads ---
 add_library(wisco_ethercat_ros2_hw_controllers SHARED src/safe_command_controller.cpp)
@@ -24,8 +26,20 @@ target_include_directories(wisco_ethercat_ros2_hw_controllers PUBLIC
 ament_target_dependencies(wisco_ethercat_ros2_hw_controllers
   controller_interface hardware_interface pluginlib rclcpp rclcpp_lifecycle realtime_tools
   std_msgs)
+
+# --- ArmController: the arm's 1 kHz Mode P / Mode T loop (arm_law.hpp + Pinocchio gravity) ---
+add_library(wisco_ethercat_ros2_hw_arm_controller SHARED src/arm_controller.cpp)
+target_compile_features(wisco_ethercat_ros2_hw_arm_controller PUBLIC cxx_std_17)
+target_include_directories(wisco_ethercat_ros2_hw_arm_controller PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
+ament_target_dependencies(wisco_ethercat_ros2_hw_arm_controller
+  controller_interface hardware_interface pluginlib rclcpp rclcpp_lifecycle realtime_tools
+  std_msgs)
+target_link_libraries(wisco_ethercat_ros2_hw_arm_controller pinocchio::pinocchio yaml-cpp)
+
 pluginlib_export_plugin_description_file(controller_interface safe_command_controller_plugin.xml)
-install(TARGETS wisco_ethercat_ros2_hw_controllers
+install(TARGETS wisco_ethercat_ros2_hw_controllers wisco_ethercat_ros2_hw_arm_controller
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -45,6 +59,11 @@ install(
   DIRECTORY config urdf launch
   DESTINATION share/${PROJECT_NAME}
 )
+# arm stack (calibration procedures, sim, PACE fit, `arm` CLI); importable from
+# share/ via scripts/arm, or from the source tree with `python3 -m arm_stack.cli`
+install(DIRECTORY arm_stack DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE)
+install(PROGRAMS scripts/arm DESTINATION lib/${PROJECT_NAME})
 install(
   PROGRAMS scripts/example_torque_command_ros_node.py
   DESTINATION lib/${PROJECT_NAME}
@@ -66,11 +85,17 @@ if(BUILD_TESTING)
   ament_add_gtest(test_safety_logic test/test_safety_logic.cpp)
   target_include_directories(test_safety_logic PRIVATE include)
 
+  ament_add_gtest(test_arm_law test/test_arm_law.cpp)
+  target_include_directories(test_arm_law PRIVATE include)
+
+  ament_add_pytest_test(test_arm_stack test/arm_stack
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} TIMEOUT 900)
+
   ament_add_pytest_test(test_hardware_config test/test_hardware_config.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(controller_interface hardware_interface pluginlib rclcpp
-  rclcpp_lifecycle realtime_tools std_msgs)
+  rclcpp_lifecycle realtime_tools std_msgs pinocchio yaml-cpp)
 ament_package()

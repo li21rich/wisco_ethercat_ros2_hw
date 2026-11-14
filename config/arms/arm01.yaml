@@ -1,0 +1,123 @@
+# Joint config for arm01, the 7 DOF test arm (spec: "Joint config").
+#
+# One per arm, checked in, changes rarely. Fields set to null are filled by
+# Phase 1 bench tests, not guessed; code falls back to the actuator model table
+# (config/actuator_models.yaml) for a null per-joint value and says so.
+#
+# Read by both sides: the launch file (bus positions, models, directions ->
+# EtherCAT slave configs and the ros2_control block) and arm_stack (units,
+# limits, gains). Joint names match urdf/arm01/arm01.urdf.
+#
+# bus_position: physical place on the ring, 0 = first drive after the master
+#   (the spec's `slave`, minus one).
+# direction: +1 if a positive drive count moves the joint positively about its
+#   URDF axis. `arm bringup` checks it and reports a mismatch.
+
+arm: arm01
+urdf: urdf/arm01/arm01.urdf
+bus: {iface: enp3s0, cycle_us: 1000, dc_sync: true}
+
+# velocity (CSV), effort (CST), or arm (CSP + CST with runtime switching, the
+# spec's Mode P / Mode T; needs the ArmController).
+control_mode: arm
+
+joints:
+  - name: shoulder_pitch      # J1, ROM -80..+200 deg
+    bus_position: 0
+    model: x6_60
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null        # motor or output
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 60.0, kd: 2.0}
+  - name: shoulder_roll       # J2, ROM 0..+190 deg (lower bound assumed 0)
+    bus_position: 1
+    model: x6_60
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 60.0, kd: 2.0}
+  - name: shoulder_yaw        # J3, ROM -90..+90 deg
+    bus_position: 2
+    model: x4_36
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 30.0, kd: 1.0}
+  - name: elbow               # J4, ROM 0..+130 deg
+    bus_position: 3
+    model: x4_36
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 30.0, kd: 1.0}
+  - name: forearm_yaw         # J5, ROM -90..+90 deg
+    bus_position: 4
+    model: x4_36
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 20.0, kd: 0.6}
+  - name: wrist_pitch         # J6, ROM -35..+35 deg
+    bus_position: 5
+    model: x4_10
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 10.0, kd: 0.3}
+  - name: wrist_yaw           # J7, ROM -90..+90 deg
+    bus_position: 6
+    model: x4_10
+    direction: 1
+    gear_ratio: null
+    counts_per_rev: null
+    encoder_side: null
+    rated_current_a: null
+    max_torque_nm: null
+    max_vel_rad_s: null
+    gains: {kp: 10.0, kd: 0.3}
+
+# Weighed at assembly, one per link (kg). null: the URDF's placeholder mass is used.
+link_masses_kg:
+  link1: null
+  link2: null
+  link3: null
+  link4: null
+  link5: null
+  link6: null
+  link7: null
+
+# Flange marker cluster for arm mocap-calib / mocap-repeat / validate.
+# topic: geometry_msgs/PoseStamped of the cluster in the mocap frame (null: no mocap).
+# length_bar_error_m: absolute error from the calibrated length bar moved through the
+#   workspace; it caps the accuracy any fit can reach (pass = 2x this).
+mocap:
+  topic: null
+  length_bar_error_m: null
+
+# Optional fixed validation poses (rad, 7 per pose). Empty: feasible random poses.
+validation:
+  iso_poses_rad: []

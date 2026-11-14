@@ -15,6 +15,9 @@ Examples:
   ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
   ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py use_mock_hardware:=true demo:=true
   ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py control_mode:=effort
+
+Other robots reuse this file with a different `description` and joint table
+(see arm01.launch.py).
 """
 
 import os
@@ -48,7 +51,9 @@ def _setup(context):
     pkg_share = get_package_share_directory(PACKAGE)
     arg = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
 
-    urdf_file = os.path.join(pkg_share, 'urdf', 'test_bench.urdf.xacro')
+    urdf_file = arg('description')
+    if not os.path.isabs(urdf_file):
+        urdf_file = os.path.join(pkg_share, urdf_file)
     template_file = os.path.join(pkg_share, 'config', 'drive_pdo_template.yaml')
     use_mock = _truthy(arg('use_mock_hardware'))
     update_rate = float(arg('update_rate'))
@@ -70,8 +75,15 @@ def _setup(context):
 
     controllers_file = os.path.join(out_dir, 'controllers.yaml')
     with open(controllers_file, 'w') as f:
-        yaml.safe_dump(config.controllers_yaml(update_rate, joint_state_rate, command_timeout),
-                       f, sort_keys=False)
+        with open(arg('joints_file')) as jf:
+            table = yaml.safe_load(jf) or {}
+        params = config.controllers_yaml(update_rate, joint_state_rate, command_timeout,
+                                         arm_config=table,
+                                         calibration_file=arg('calibration_file') or None)
+        if config.control_mode == 'arm':
+            # the ArmController builds its Pinocchio gravity model from this
+            params[config.controller_name()]['ros__parameters']['robot_description'] =                 robot_description
+        yaml.safe_dump(params, f, sort_keys=False)
 
     actions = [
         RegisterEventHandler(OnShutdown(on_shutdown=[
@@ -118,7 +130,7 @@ def _setup(context):
         arguments=[controller, '--controller-manager', '/controller_manager'],
     ))
 
-    if _truthy(arg('demo')):
+    if _truthy(arg('demo')) and config.control_mode != 'arm':
         script = ('multi_velocity_cmd.py' if config.command_interface == 'velocity'
                   else 'multiple_act_command.py')
         actions.append(Node(
@@ -138,6 +150,9 @@ def generate_launch_description():
     pkg_share = get_package_share_directory(PACKAGE)
     config_dir = os.path.join(pkg_share, 'config')
     args = [
+        DeclareLaunchArgument('description', default_value='urdf/test_bench.urdf.xacro',
+                              description='Robot description xacro (relative to the package '
+                                          'share dir or absolute); takes hardware_manifest'),
         DeclareLaunchArgument('joints_file', default_value=os.path.join(config_dir, 'joints.yaml'),
                               description='Joint table: joint -> bus position, model, direction'),
         DeclareLaunchArgument('models_file',
@@ -147,8 +162,8 @@ def generate_launch_description():
                               default_value=os.path.join(config_dir, 'calibration.yaml'),
                               description='Per-joint zero offsets; empty for none'),
         DeclareLaunchArgument('control_mode', default_value='',
-                              description='velocity (CSV) or effort (CST); empty uses the joint '
-                                          'table'),
+                              description='velocity (CSV), effort (CST) or arm (CSP/CST via '
+                                          'the ArmController); empty uses the joint table'),
         DeclareLaunchArgument('update_rate', default_value='100',
                               description='Controller manager and EtherCAT cycle rate, Hz'),
         DeclareLaunchArgument('joint_state_rate', default_value='100',

@@ -170,6 +170,91 @@ Hardware notes: all drives currently share one EtherCAT ring, so one bad connect
 stops the whole arm. Route cables so each joint's connector can be reseated without
 disassembly, and watch the working counter (`ethercat domains`).
 
+## Arm stack (arm01, the 7-DOF test arm)
+
+The calibration and control stack from the spec ("Arm Calibration and Control Stack
+Spec"), on top of this package's hardware layer.
+
+```bash
+# the arm (mock hardware first)
+ros2 launch wisco_ethercat_ros2_hw arm01.launch.py use_mock_hardware:=true
+ros2 launch wisco_ethercat_ros2_hw arm01.launch.py
+
+# one command per stage; --sim runs the same code on the sim backend
+ros2 run wisco_ethercat_ros2_hw arm bringup --sim      # or: python3 -m arm_stack.cli bringup --sim
+ros2 run wisco_ethercat_ros2_hw arm all --sim --quick --fresh   # every stage on one sim arm
+ros2 run wisco_ethercat_ros2_hw arm status
+ros2 run wisco_ethercat_ros2_hw arm export pace ~/arm_logs/SESSION.mcap out
+ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/arm_logs/B.mcap
+```
+
+| Stage | Command | Writes |
+|---|---|---|
+| 1 Bring up | `arm bringup` | joint config `direction` (with `--write-config`) |
+| 2 Zero | `arm zero` | `zero_offsets_rad` |
+| 3 Limits | `arm limits` | `soft_limits_rad` |
+| 4 Torque constant | `arm kt` | `kt_output_nm_per_a` |
+| 5 Gravity comp | `arm gravity` | `link_inertials` |
+| 6 Friction | `arm friction` | `friction` |
+| 7 Latency | `arm latency` | `latency_ms` |
+| 8 Kinematics | `arm pivot` | `validation.pivot_spread_mm` |
+| 9 PACE | `arm pace` | `pace` |
+| Mocap kinematics | `arm mocap-calib` | `zero_offsets_rad`, `kinematic_overlay`, `joint_stiffness_nm_per_rad` |
+| Mocap repeatability | `arm mocap-repeat` | `validation.repeatability_rp_mm` (+ tuned settings to apply) |
+| Release gate | `arm validate` | `validation.*`, report beside the calibration file |
+
+Layout:
+
+- `urdf/arm01/arm01.urdf`: URDF from the STEP (`tools/cad/extract_arm01.py` rebuilds the
+  meshes and numbers; the ledger at the top of the URDF lists every frame convention and
+  assumption). `arm01.ros2_control.xacro` adds the ros2_control block.
+- `config/arms/arm01.yaml`: the arm's joint config (`control_mode: arm`).
+  `config/calib/arm01/<date>_v<N>.yaml`: calibration versions, append-only, written by the stages.
+- `src/arm_controller.cpp`, `include/.../arm_law.hpp`: the 1 kHz RT loop as a ros2_control
+  controller. Mode P = CSP target (0x607A) + gravity/friction torque offset (0x60B2);
+  Mode T = CST host PD + feedforward (0x6071). Pinocchio gravity from `robot_description` plus
+  the calibration file, soft limits, torque/velocity clamps, bumpless switching, and a 50 ms
+  watchdog that drops to gravity comp + damping. `~/command` and `~/state` layouts are in
+  `arm_controller.hpp`.
+- `arm_stack/`: Python. `calib/` (stages), `control/` (the same law in Python, trajectories),
+  `hw/` (ArmClient API; `ros_client.py` for the arm), `sim/` (sim backend with injectable
+  errors), `model/` (Pinocchio model + calibration), `pace/` (CMA-ES, replay backend, GP-BO),
+  `log/` (MCAP recorder, exports), `cli.py`.
+
+Tests: `test/test_arm_law.cpp` (gtest) and `test/arm_stack/` (pytest, same law cases in
+Python, optimizers, ISO 9283, recorder). The Phase 0 gate (every procedure recovers its
+injected errors in sim) is `ARM_PHASE0_GATE=1 python3 -m pytest test/arm_stack/test_phase0_gate.py`.
+
+Assumptions that need the bench (also in the URDF ledger):
+
+- Zeros: J1, J3, J5, J6 and J7 read 0 at the CAD pose; J4 reads 0 with the elbow straight
+  (the CAD has it flexed 24.7°, so the geometry past J4 was rotated back). J2's lower limit
+  is 0 (the given ROM is +190 only). Joint signs follow the right-hand rule about the URDF
+  axes; `arm bringup` checks them against gravity, and J3 is mounted inverted so its
+  `direction` may need to be −1.
+- The wrist pitch parallelogram (crank 41.75, rod 70.0, ground 69.9 mm) is modeled 1:1 with
+  mimic joints; only `wrist_pitch` is driven.
+- Link masses come from CAD volumes with placeholder densities until the weighed values
+  land in `link_masses_kg`.
+- 0x60B2 (torque offset) in the CSP PDO map is not confirmed on the RMD-X drives; without it
+  Mode P loses its gravity feedforward. CSP gains being settable over SDO is also
+  unconfirmed (`mocap-repeat` leaves Kp/Kd out of its tuning if not).
+- J7's axis sits about 62° from the forearm at zero because J6's zero is the CAD pose.
+- The PACE stage fits with a per-joint replay backend; the Isaac Lab backend is a stub
+  (`arm_stack/pace/backend.py`) until Isaac Lab is set up. Each chirp stops below its
+  joint's servo resonance (about 5 Hz on the shoulders) because the per-joint replay
+  cannot follow the coupled arm above it, and PACE uses the drives' CSP gains from
+  `drive_gains` in the joint config (read them over SDO) rather than fitting them.
+  Shoulder and elbow armature fits soak up arm coupling, so treat them as effective values.
+- `latency_ms` is the transport delay on the torque channel (0x6071 sent vs 0x6077 read,
+  Mode T), not the spec's position cross-correlation, which includes the drive's servo lag
+  (both are logged).
+- The gravity fit's pass threshold has a floor of one 0x6077 count, so low-gravity wrist
+  joints are not failed on quantization.
+- The ROS client re-derives raw counts and per-mille from converted values, and reports the
+  status word as enabled, until the drive manifest exposes 0x6064/0x6077/0x6041 as state
+  interfaces.
+
 ## Scripts
 
 | Script | Mode | What it does |

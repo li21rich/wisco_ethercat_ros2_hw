@@ -21,10 +21,16 @@ import xml.etree.ElementTree as ET
 import yaml
 
 CONTROL_MODES = {
-    # control_mode: (CiA402 mode of operation, ros2_control command interface)
+    # control_mode: (CiA402 mode of operation at start-up, ros2_control command interface)
     'velocity': (9, 'velocity'),
     'effort': (10, 'effort'),
+    # The arm stack's Mode P / Mode T (spec: Hardware assumptions): starts in
+    # CSP (8); the ArmController switches 0x6060 to CST (10) at runtime. Each
+    # joint exports position (0x607A), effort (0x6071), torque_offset (0x60B2,
+    # gravity + friction feedforward in CSP) and mode_of_operation (0x6060).
+    'arm': (8, 'arm'),
 }
+ARM_COMMAND_INTERFACES = ['position', 'effort', 'torque_offset', 'mode_of_operation']
 
 MOVABLE_JOINT_TYPES = ('revolute', 'continuous', 'prismatic')
 
@@ -45,6 +51,8 @@ def read_urdf_joints(urdf_xml):
     for joint in root.findall('joint'):
         if joint.get('type') not in MOVABLE_JOINT_TYPES:
             continue
+        if joint.find('mimic') is not None:
+            continue    # computed by robot_state_publisher, never a drive
         limit = joint.find('limit')
         lower = -math.inf
         upper = math.inf
@@ -132,10 +140,20 @@ class HardwareConfig:
                 'control_mode must be one of %s, got %r' % (sorted(CONTROL_MODES),
                                                             self.control_mode))
         self.mode_of_operation, self.command_interface = CONTROL_MODES[self.control_mode]
+        self.command_interfaces = (list(ARM_COMMAND_INTERFACES) if self.control_mode == 'arm'
+                                   else [self.command_interface])
 
         self.urdf_joints = read_urdf_joints(urdf_xml)
         rows = table.get('joints') or []
         self.joints = self._build_joints(rows, zero_offsets)
+        # stage 3 (`arm limits`) writes soft limits into the calibration file;
+        # they win over the URDF unless the joint table overrides them
+        soft = calibration.get('soft_limits_rad') or {}
+        for joint, row in zip(sorted(self.joints, key=lambda j: j.bus_position),
+                              sorted(rows, key=lambda r: int(r['bus_position']))):
+            lo, hi = (soft.get(joint.name) or [None, None])
+            if 'soft_limits_rad' not in row and lo is not None and hi is not None:
+                joint.position_limits = (float(lo), float(hi))
         hw_names = {j.name for j in self.joints}
         self.mock_joints = [n for n in self.urdf_joints if n not in hw_names]
 
@@ -210,24 +228,38 @@ class HardwareConfig:
 
         pos_factor, pos_offset = joint.position_state()
         cmd_pos_factor, cmd_pos_offset = joint.position_command()
+        arm = self.control_mode == 'arm'
+        if arm:
+            # 0x60B2 torque offset (CSP feedforward). Not in the base template:
+            # whether the drive accepts it in its RxPDO map is a bench check.
+            channels = cfg['rpdo'][0]['channels']
+            at = next(i for i, ch in enumerate(channels) if ch['index'] == 0x6072)
+            channels.insert(at, {'index': 0x60b2, 'sub_index': 0, 'type': 'int16', 'default': 0})
         for pdo in cfg['rpdo']:
             for ch in pdo['channels']:
                 index = ch['index']
                 if index == 0x607a:
                     ch['factor'] = cmd_pos_factor
                     ch['offset'] = cmd_pos_offset
+                    if arm:
+                        ch['command_interface'] = 'position'
+                elif index == 0x60b2:
+                    ch['factor'] = joint.effort_command()
+                    ch['command_interface'] = 'torque_offset'
                 elif index == 0x60ff:
                     ch['factor'] = joint.velocity_command()
                     if self.command_interface == 'velocity':
                         ch['command_interface'] = 'velocity'
                 elif index == 0x6071:
                     ch['factor'] = joint.effort_command()
-                    if self.command_interface == 'effort':
+                    if self.command_interface == 'effort' or arm:
                         ch['command_interface'] = 'effort'
                 elif index == 0x6072:
                     ch['default'] = joint.max_torque_permille
                 elif index == 0x6060:
                     ch['default'] = self.mode_of_operation
+                    if arm:
+                        ch['command_interface'] = 'mode_of_operation'
         for pdo in cfg['tpdo']:
             for ch in pdo['channels']:
                 index = ch['index']
@@ -261,6 +293,7 @@ class HardwareConfig:
             'control_frequency': float(control_frequency),
             'mode_of_operation': self.mode_of_operation,
             'command_interface': self.command_interface,
+            'command_interfaces': list(self.command_interfaces),
             'ethercat': ethercat,
             'mock': list(self.mock_joints),
         }
@@ -271,6 +304,27 @@ class HardwareConfig:
 
     def controller_name(self):
         return '%s_controller' % self.command_interface
+
+    def arm_controller_parameters(self, arm_config=None, calibration_file=None):
+        """ros__parameters for the ArmController (control_mode: arm)."""
+        arm_config = arm_config or {}
+        rows = {r['name']: r for r in arm_config.get('joints') or []}
+        gains = [rows.get(j.name, {}).get('gains') or {} for j in self.joints]
+        return {
+            'joints': [j.name for j in self.joints],
+            'max_torque': [float(rows.get(j.name, {}).get('max_torque_nm') or j.max_effort)
+                           for j in self.joints],
+            'max_velocity': [float(rows.get(j.name, {}).get('max_vel_rad_s') or j.max_velocity)
+                             for j in self.joints],
+            'soft_lower': [_finite(j.position_limits[0], -1e9) for j in self.joints],
+            'soft_upper': [_finite(j.position_limits[1], 1e9) for j in self.joints],
+            'kp': [float(g.get('kp', 0.0)) for g in gains],
+            'kd': [float(g.get('kd', 0.0)) for g in gains],
+            'kd_fallback': [max(float(g.get('kd', 0.0)), j.damping)
+                            for g, j in zip(gains, self.joints)],
+            'watchdog_s': 0.05,
+            'calibration_file': calibration_file or '',
+        }
 
     def controller_parameters(self, command_timeout=0.1, soft_margin=0.1):
         """ros__parameters for the SafeCommandController."""
@@ -289,9 +343,23 @@ class HardwareConfig:
             'damping': [j.damping for j in self.joints],
         }
 
-    def controllers_yaml(self, update_rate, joint_state_rate, command_timeout=0.1):
+    def controllers_yaml(self, update_rate, joint_state_rate, command_timeout=0.1,
+                         arm_config=None, calibration_file=None):
         """Full parameter file for ros2_control_node and the spawners."""
         name = self.controller_name()
+        if self.control_mode == 'arm':
+            return {
+                'controller_manager': {'ros__parameters': {
+                    'update_rate': int(update_rate),
+                    'joint_state_broadcaster': {
+                        'type': 'joint_state_broadcaster/JointStateBroadcaster'},
+                    name: {'type': 'wisco_ethercat_ros2_hw/ArmController'},
+                }},
+                'joint_state_broadcaster': {'ros__parameters': {
+                    'update_rate': int(min(joint_state_rate, update_rate))}},
+                name: {'ros__parameters': self.arm_controller_parameters(arm_config,
+                                                                         calibration_file)},
+            }
         return {
             'controller_manager': {'ros__parameters': {
                 'update_rate': int(update_rate),
