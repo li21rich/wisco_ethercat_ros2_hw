@@ -240,8 +240,13 @@ Assumptions that need the bench (also in the URDF ledger):
   Mode P loses its gravity feedforward. CSP gains being settable over SDO is also
   unconfirmed (`mocap-repeat` leaves Kp/Kd out of its tuning if not).
 - J7's axis sits about 62° from the forearm at zero because J6's zero is the CAD pose.
-- The PACE stage fits with a per-joint replay backend; the Isaac Lab backend is a stub
-  (`arm_stack/pace/backend.py`) until Isaac Lab is set up. Each chirp stops below its
+- The PACE stage fits with a per-joint replay backend by default. The Isaac Lab backend
+  (`arm_stack/pace/isaac_backend.py`, `fit(..., backend='isaac')`) replays the same logs or
+  `arm export pace` npz files on the full arm, one env per candidate, but is untested
+  against a real Isaac Lab install (only against a fake `isaaclab` in the tests): build the
+  USD with `tools/isaac/import_urdf.py` and check it with `tools/isaac/check_model.py`
+  first. The USD fixes the parallelogram's mimic joints and merges them into link5, as
+  Pinocchio does, so only `wrist_pitch` is driven. Each chirp stops below its
   joint's servo resonance (about 5 Hz on the shoulders) because the per-joint replay
   cannot follow the coupled arm above it, and PACE uses the drives' CSP gains from
   `drive_gains` in the joint config (read them over SDO) rather than fitting them.

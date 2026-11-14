@@ -12,9 +12,9 @@ Two backends:
                       axis and gravity along the sweep taken from the
                       Pinocchio model. Vectorized over every candidate of every
                       joint, so one CMA-ES generation is one batched replay.
-  IsaacLabBackend     replays the same arrays in Isaac Lab (full arm). Not
-                      runnable here; it documents the interface the PACE
-                      recorder expects and is selected with --backend isaac.
+  IsaacLabBackend     replays the same arrays in Isaac Lab (full arm, one env
+                      per candidate), isaac_backend.py. Needs isaaclab;
+                      selected with backend='isaac'.
 """
 
 from __future__ import annotations
@@ -101,19 +101,15 @@ class JointReplayBackend:
 
 
 class IsaacLabBackend:
-    """Placeholder for the Isaac Lab replay (full arm, same parameters).
+    """The Isaac Lab replay (full arm, same parameters): arm_stack/pace/isaac_backend.py.
 
-    Implement `simulate(k, P)` by building an Articulation from the arm's URDF
-    with an ImplicitActuator per joint (stiffness/damping = drive_kp/kd,
-    armature, friction, viscous damping), applying encoder bias as a position
-    offset and delay as a command buffer of round(delay_s / sim_dt) steps, then
-    stepping through the exported command arrays (`arm export pace`).
+    Imported lazily so the stack runs without Isaac Lab; constructing it without
+    an importable `isaaclab` raises an ImportError saying how to get it.
     """
 
-    def __init__(self, *_, **__):
-        raise NotImplementedError(
-            'Isaac Lab is not installed on this machine. Export the logs with `arm export pace` and run '
-            'the PACE fit in Isaac Lab, or use the built-in backend (--backend joint).')
+    def __new__(cls, *args, **kwargs):
+        from .isaac_backend import IsaacLabBackend as _Impl
+        return _Impl(*args, **kwargs)
 
 
 def default_bounds(spec, drive_known: Optional[Dict] = None):

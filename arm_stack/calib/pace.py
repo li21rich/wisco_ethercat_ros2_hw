@@ -91,9 +91,7 @@ def decimate(log: JointLog, k: int) -> JointLog:
 
 
 def fit(model, arm, logs, generations=60, popsize=14, seed=0, backend='joint', drive_gains=None):
-    if backend == 'isaac':
-        IsaacLabBackend()
-    sim = JointReplayBackend(model, logs)
+    sim = (IsaacLabBackend if backend == 'isaac' else JointReplayBackend)(model, logs)
     maps, opts = [], []
     for k, log in enumerate(logs):
         spec = arm.joints[log.joint]
