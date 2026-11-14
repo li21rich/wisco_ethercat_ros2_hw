@@ -49,6 +49,10 @@ class Command:
     ignore_soft_limits: bool = False
     # scales the friction model in the feedforward (mocap-repeat tunes it)
     friction_ff_gain: float = 1.0
+    # (kg, x, y, z): point mass at the flange, in the tool0 frame. The RT loop
+    # keeps the last one sent and adds its gravity, watchdog fallback included;
+    # None = leave it as it is, mass 0 = clear it.
+    payload: Optional[Sequence[float]] = None
 
 
 @dataclass

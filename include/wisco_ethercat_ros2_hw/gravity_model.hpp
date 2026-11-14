@@ -39,12 +39,41 @@ public:
 
   const pinocchio::Model & model() const {return model_;}
 
+  // Payload: a point mass fixed in `frame` (tool0), carried as extra inertia on
+  // the frame's parent joint body, so gravity() includes it. Call after load(),
+  // so the calibrated inertia is the base the payload is added to.
+  bool set_payload_frame(const std::string & frame)
+  {
+    if (!model_.existFrame(frame)) {return false;}
+    const auto & f = model_.frames[model_.getFrameId(frame)];
+    if (f.parentJoint == 0) {return false;}
+    payload_joint_ = f.parentJoint;
+    payload_placement_ = f.placement;
+    payload_base_ = model_.inertias[payload_joint_];
+    return true;
+  }
+
+  // RT safe (fixed-size Eigen, no allocation). kg <= 0 removes it.
+  void set_payload(double kg, double x, double y, double z)
+  {
+    if (payload_joint_ == 0) {return;}
+    model_.inertias[payload_joint_] = payload_base_;
+    if (kg > 0) {
+      const Eigen::Vector3d c = payload_placement_.act(Eigen::Vector3d(x, y, z));
+      model_.inertias[payload_joint_] =
+        payload_base_ + pinocchio::Inertia(kg, c, pinocchio::Symmetric3::Zero());
+    }
+  }
+
 private:
   pinocchio::Model model_;
   std::unique_ptr<pinocchio::Data> data_;
   Eigen::VectorXd q_;
   std::vector<pinocchio::JointIndex> jid_;
   std::vector<int> vidx_;
+  pinocchio::JointIndex payload_joint_ = 0;
+  pinocchio::SE3 payload_placement_ = pinocchio::SE3::Identity();
+  pinocchio::Inertia payload_base_ = pinocchio::Inertia::Zero();
 };
 
 }  // namespace wisco_ethercat_ros2_hw

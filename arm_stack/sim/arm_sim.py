@@ -143,6 +143,7 @@ class SimArm(ArmClient):
         self.tau_drive = np.zeros(n)     # motor torque actually produced
         self.tau_cycle = np.zeros(n)     # its mean over the last cycle: what 0x6077 reports
         self.deflection = np.zeros(n)    # motor angle - link angle
+        self.tau_ext = np.zeros(n)       # operator / environment torque on the links
         self.t = 0.0
         self.power_on_t = 0.0
 
@@ -273,6 +274,8 @@ class SimArm(ArmClient):
         self.tau_cycle = acc / self.substeps
 
     def _friction(self, qd, tau_other):
+        """The friction law as a smooth function (reference; _integrate applies the
+        Coulomb + stiction part as a bounded impulse instead)."""
         eps = 1e-3
         stribeck = self.coulomb + self.stiction * np.exp(-(qd / 0.02) ** 2)
         return stribeck * np.tanh(qd / eps) + self.viscous * qd
@@ -290,36 +293,76 @@ class SimArm(ArmClient):
         under = self.stop_lower - q
         tau_stop -= np.where(over > 0, 2000.0 * over + 20.0 * qd, 0.0)
         tau_stop += np.where(under > 0, 2000.0 * under - 20.0 * qd, 0.0)
-        tau_net = tau_motor + tau_stop
-        # stiction: stick when slow and the net torque cannot break away
-        g = self.truth.gravity(q)
-        breakaway = self.coulomb + self.stiction
-        drive_minus_g = tau_net - g
-        stuck = (np.abs(qd) < 1e-3) & (np.abs(drive_minus_g) < breakaway)
+        tau_net = tau_motor + tau_stop + self.tau_ext
         M = self.truth.mass_matrix(q) + np.diag(self.armature)
         bias = self.truth.rnea(q, qd, np.zeros(self.n))  # C qd + g
-        fric = self._friction(qd, drive_minus_g)
         # semi-implicit viscous term for stability
         Md = M + h * np.diag(self.viscous)
-        qdd = np.linalg.solve(Md, tau_net - bias - (fric - self.viscous * qd) - self.viscous * qd)
-        qd_new = qd + h * qdd
-        qd_new = np.where(stuck & (np.abs(qd_new) < 2e-3), 0.0, qd_new)
+        Minv = np.linalg.inv(Md)
+        qd_free = qd + h * (Minv @ (tau_net - bias - self.viscous * qd))
+        # Coulomb + Stribeck stiction as a velocity-level impulse (time-stepping
+        # friction): per joint at most h * F, never more than it takes to stop
+        # the joint. Sticks while the net torque is under the breakaway, and an
+        # explicit tanh friction cannot chatter a light joint into a creep.
+        # The sticking set S is solved jointly through M (sliding joints take
+        # the full impulse), dropping joints whose impulse would exceed h * F.
+        level = self.coulomb + self.stiction * np.exp(-(qd / 0.02) ** 2)
+        lim = h * level
+        p = np.zeros(self.n)
+        S = (lim > 0) & (np.abs(qd_free) <= lim * np.diag(Minv))
+        for _ in range(4):
+            p = np.where(S, 0.0, np.sign(qd_free) * lim)
+            if not S.any():
+                break
+            F = ~S
+            rhs = qd_free[S] - Minv[np.ix_(S, F)] @ p[F]
+            p[S] = np.linalg.solve(Minv[np.ix_(S, S)], rhs)
+            bad = S & (np.abs(p) > lim * (1 + 1e-9))
+            if not bad.any():
+                break
+            S = S & ~bad
+        p = np.clip(p, -lim, lim)
+        qd_new = qd_free - Minv @ p
         self.qd = qd_new
         self.q = q + h * qd_new
 
     # ------------------------------------------------------------------ test-rig actions
     def set_payload(self, payload: Optional[Payload]) -> None:
+        """payload.link: a link of a configured joint, or any frame (tool0, flange);
+        the offset is in that link's / frame's coordinates."""
         self.payload = payload
         for k, j in enumerate(self.truth.jid):
             self.truth.model.inertias[j] = self._truth_inertias[k].copy()
         if payload is not None:
             links = self.truth.link_names()
-            k = links.index(payload.link)
-            j = self.truth.jid[k]
+            offset = np.array(payload.offset_m, float)
+            if payload.link in links:
+                j = self.truth.jid[links.index(payload.link)]
+            else:
+                f = self.truth.model.frames[self.truth.model.getFrameId(payload.link)]
+                j = f.parentJoint
+                offset = f.placement.act(offset)
             # a point-ish mass at the offset, in that link's frame
-            extra = pin.Inertia(payload.mass_kg, np.array(payload.offset_m, float), np.eye(3) * 1e-6)
+            extra = pin.Inertia(payload.mass_kg, offset, np.eye(3) * 1e-6)
             self.truth.model.inertias[j] = self.truth.model.inertias[j] + extra
         self.truth.data = self.truth.model.createData()
+
+    def apply_external_torque(self, tau: Optional[np.ndarray]) -> None:
+        """Sim-only: joint torques from outside (an operator's hands), applied to
+        the links from the next cycle until changed; None or zeros releases.
+        Not seen by the current sensor, as on the real drive."""
+        self.tau_ext = np.zeros(self.n) if tau is None else np.array(tau, float)
+
+    def apply_external_force(self, force: Optional[np.ndarray], frame: str = 'tool0',
+                             torque: Optional[np.ndarray] = None) -> np.ndarray:
+        """Sim-only: a world-frame force (N) and optional moment (Nm) at `frame`,
+        mapped to joint torques through the true Jacobian at the current pose."""
+        if force is None:
+            self.apply_external_torque(None)
+            return self.tau_ext
+        w = np.concatenate([np.asarray(force, float), np.zeros(3) if torque is None else np.asarray(torque, float)])
+        self.apply_external_torque(self.truth.jacobian(self.q, frame).T @ w)
+        return self.tau_ext
 
     def place_in_jig(self, q_jig: np.ndarray) -> None:
         self.q = np.array(q_jig, float) + self.rng.normal(0, self.err.jig_reseat_sigma_rad, self.n)

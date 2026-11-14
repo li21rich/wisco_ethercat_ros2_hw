@@ -7,6 +7,11 @@ Per cycle:
   Mode T: tau = Kp(q_d - q) + Kd(qd_d - qd) + g(q) + f(qd) + tau_ff -> 0x6071
 then clamp torque and velocity, enforce soft limits, and fall back to gravity
 comp plus joint damping if no command arrived within the watchdog (50 ms).
+
+Payload: a command may carry `payload` = (kg, x, y, z), a point mass in the
+tool0 frame. The law keeps the last one it got (mass <= 0 clears it) and adds
+its gravity to g(q) everywhere, the watchdog fallback included, as the C++
+GravityModel does by adding it to the inertia of tool0's parent link.
 """
 
 from __future__ import annotations
@@ -31,6 +36,21 @@ class LawOutput:
     fallback: bool
 
 
+def payload_gravity(model, q, payload, frame: Optional[str] = None) -> np.ndarray:
+    """Holding torque of a point mass (kg, x, y, z) fixed in `frame` (tool0):
+    J_p(q)^T m g_up, J_p the world-aligned linear Jacobian of that point."""
+    n = len(q)
+    if payload is None or not payload[0] > 0:
+        return np.zeros(n)
+    frame = frame or getattr(model, 'tool_frame', 'tool0')
+    M = model.fk(q, frame)
+    r = M.rotation @ np.asarray(payload[1:4], float)
+    J = model.jacobian(q, frame)
+    skew = np.array([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]])
+    Jp = J[:3] - skew @ J[3:]
+    return Jp.T @ np.array([0.0, 0.0, 9.81 * float(payload[0])])
+
+
 class ControlLaw:
 
     def __init__(self, model, max_torque, max_vel, soft_lower, soft_upper, kd_fallback,
@@ -43,12 +63,23 @@ class ControlLaw:
         self.kd_fallback = np.asarray(kd_fallback, float)
         self.margin = soft_margin
         self.limit_stiffness = 4.0 * self.max_torque / max(soft_margin, 1e-3)
+        self.payload = None       # (kg, x, y, z) in tool0, sticky across commands
+
+    def gravity(self, q) -> np.ndarray:
+        """g(q) of the arm plus the current payload."""
+        g = self.model.gravity(q)
+        if self.payload is not None:
+            g = g + payload_gravity(self.model, q, self.payload)
+        return g
 
     def compute(self, cmd: Optional[Command], age_s: float, q, qd, last_mode: str) -> LawOutput:
         n = len(q)
         q = np.asarray(q, float)
         qd = np.asarray(qd, float)
-        g = self.model.gravity(q)
+        p = getattr(cmd, 'payload', None) if cmd is not None else None
+        if p is not None and np.isfinite(p[0]):
+            self.payload = tuple(float(x) for x in p) if p[0] > 0 else None
+        g = self.gravity(q)
         fallback = cmd is None or age_s > WATCHDOG_S or cmd.q is None and cmd.mode == 'P'
         if fallback:
             # gravity comp plus joint damping, in torque mode

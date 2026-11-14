@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <map>
 
@@ -42,6 +43,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
     auto_declare<std::vector<double>>("link_mass_values", std::vector<double>{});
+    auto_declare<std::string>("payload_frame", "tool0");
   } catch (const std::exception & e) {
     std::fprintf(stderr, "ArmController: exception in on_init: %s\n", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -103,6 +105,12 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     RCLCPP_ERROR(logger, "%s", error.c_str());
     return controller_interface::CallbackReturn::ERROR;
   }
+  const std::string payload_frame = node->get_parameter("payload_frame").as_string();
+  payload_ok_ = gravity_->set_payload_frame(payload_frame);
+  if (!payload_ok_) {
+    RCLCPP_WARN(logger, "payload_frame '%s' is not in robot_description: payload blocks are ignored",
+      payload_frame.c_str());
+  }
 
   q_.assign(n, 0.0);
   qd_.assign(n, 0.0);
@@ -120,10 +128,11 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   subscription_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
     "~/command", rclcpp::SystemDefaultsQoS(),
     [this, n, expected](const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-      if (msg->data.size() != expected) {
+      if (msg->data.size() != expected && msg->data.size() != expected + kPayloadBlock) {
         RCLCPP_WARN_THROTTLE(
           get_node()->get_logger(), *get_node()->get_clock(), 2000,
-          "ignoring command with %zu values; expected %zu", msg->data.size(), expected);
+          "ignoring command with %zu values; expected %zu (or %zu with a payload)", msg->data.size(),
+          expected, expected + kPayloadBlock);
         return;
       }
       auto c = std::make_shared<Command>();
@@ -144,6 +153,12 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
       c->law.kd = block(3);
       c->law.tau_ff = block(4);
       c->law.torque_clamp = block(5);
+      if (d.size() == expected + kPayloadBlock && std::isfinite(d[expected])) {
+        c->has_payload = true;
+        for (size_t k = 0; k < kPayloadBlock; ++k) {
+          c->payload[k] = std::isfinite(d[expected + k]) ? d[expected + k] : 0.0;
+        }
+      }
       c->received_ns = steady_now_ns();
       command_buffer_.writeFromNonRT(c);
     });
@@ -229,6 +244,8 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     since_ease_[i] = 0.0;
   }
   std::fill(enabled_.begin(), enabled_.end(), true);
+  std::fill(std::begin(payload_), std::end(payload_), 0.0);
+  gravity_->set_payload(0.0, 0.0, 0.0, 0.0);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -260,7 +277,6 @@ controller_interface::return_type ArmController::update(
     qd_[i] = st_vel_[i].get().get_value();
     tau_meas_[i] = st_eff_[i].get().get_value();
   }
-  gravity_->gravity(q_, g_);
 
   // A drive that is not OPERATION_ENABLED follows nothing: hold the whole arm
   // in the fallback until every drive is back.
@@ -277,7 +293,16 @@ controller_interface::return_type ArmController::update(
   const std::shared_ptr<Command> cmd = *command_buffer_.readFromRT();
   if (cmd) {
     cmd->law.age_s = (now - cmd->received_ns) * 1e-9;
+    // the payload is sticky: kept after the command goes stale (the watchdog
+    // fallback still carries it) and by later commands without the block
+    if (cmd->has_payload && payload_ok_ &&
+      !std::equal(std::begin(payload_), std::end(payload_), std::begin(cmd->payload)))
+    {
+      std::copy(std::begin(cmd->payload), std::end(cmd->payload), std::begin(payload_));
+      gravity_->set_payload(payload_[0], payload_[1], payload_[2], payload_[3]);
+    }
   }
+  gravity_->gravity(q_, g_);
   arm::compute(cfg_, cmd && all_enabled ? cmd->law : kNone, q_, qd_, g_, out_);
 
   if (out_.mode != last_mode_) {

@@ -8,6 +8,13 @@
 //                     torque_clamp[n]]
 //                    NaN = not set. A command older than watchdog_s (50 ms)
 //                    drops the arm into gravity comp + damping in CST.
+//                    Optionally followed by a payload block [kg, x, y, z]: a
+//                    point mass fixed in payload_frame (parameter, default
+//                    tool0), added to g(q) from then on (Mode P, Mode T and the
+//                    watchdog fallback) until a command carries another one;
+//                    kg <= 0 clears it, NaN kg leaves it. Commands without the
+//                    block (the original length) leave it as it is. Reset to
+//                    none on activation.
 //   ~/state (out)    [t (s, steady), mode, fallback, limit_hit, clamped,
 //                     q[n], qd[n], tau_measured[n], tau_out[n], q_target[n]]
 //                    every cycle, through a realtime publisher (try-lock; the
@@ -56,6 +63,7 @@ class GravityModel;
 
 constexpr size_t kCommandHeader = 3;
 constexpr size_t kCommandBlocks = 6;
+constexpr size_t kPayloadBlock = 4;   // optional [kg, x, y, z] after the per-joint blocks
 constexpr size_t kStateHeader = 5;
 constexpr size_t kStateBlocks = 5;
 
@@ -79,6 +87,8 @@ private:
   {
     arm::LawCommand law;
     int64_t received_ns = 0;
+    bool has_payload = false;          // the optional payload block was sent
+    double payload[kPayloadBlock] = {0.0, 0.0, 0.0, 0.0};
   };
   using Ref = std::reference_wrapper<hardware_interface::LoanedCommandInterface>;
   using StateRef = std::reference_wrapper<hardware_interface::LoanedStateInterface>;
@@ -102,6 +112,8 @@ private:
   // (0x6072) and writes the command's torque clamp there, so the drive's CSP
   // loop cannot exceed it. Needs 0x6072 mapped as a command interface.
   bool write_max_torque_ = false;
+  bool payload_ok_ = false;                         // payload_frame found in the model
+  double payload_[kPayloadBlock] = {0.0, 0.0, 0.0, 0.0};   // applied now (RT thread only)
 
   // preallocated per-cycle buffers
   std::vector<double> q_, qd_, tau_meas_, g_, tau_switch_, q_target_prev_;
