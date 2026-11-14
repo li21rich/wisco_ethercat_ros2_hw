@@ -78,6 +78,7 @@ class JointSpec:
     kp: float
     kd: float
     nulls: List[str] = field(default_factory=list)  # fields that fell back to the model table
+    serial: Optional[str] = None                    # actuator serial (bench rig runs)
 
 
 @dataclass
@@ -107,11 +108,31 @@ class ArmConfig:
         return file_hash(self.path)
 
 
+def arm_path(name_or_path: str) -> str:
+    """`bench01` -> config/arms/bench01.yaml; paths pass through."""
+    if os.sep in name_or_path or '/' in name_or_path or name_or_path.endswith(('.yaml', '.yml')):
+        return name_or_path
+    return os.path.join('config', 'arms', name_or_path + '.yaml')
+
+
 def load_arm(path: str = 'config/arms/arm01.yaml',
-             models_path: str = 'config/actuator_models.yaml') -> ArmConfig:
-    path = resolve(path)
+             models_path: str = 'config/actuator_models.yaml',
+             model: Optional[str] = None, serial: Optional[str] = None) -> ArmConfig:
+    """model / serial override every joint row's `model` / `serial` (bench rig: one
+    joint, whichever actuator is mounted today)."""
+    path = resolve(arm_path(path))
     raw = load_yaml(path)
     models = load_yaml(resolve(models_path)).get('models', {})
+    if model is not None or serial is not None:
+        raw = copy.deepcopy(raw)
+        for row in raw['joints']:
+            if model is not None:
+                if model not in models:
+                    raise ValueError('unknown actuator model %r (config/actuator_models.yaml has %s)'
+                                     % (model, sorted(models)))
+                row['model'] = model
+            if serial is not None:
+                row['serial'] = str(serial)
     joints = []
     for row in sorted(raw['joints'], key=lambda r: int(r['bus_position'])):
         model = models[row['model']]
@@ -141,6 +162,7 @@ def load_arm(path: str = 'config/arms/arm01.yaml',
             kp=float(gains.get('kp', 0.0)),
             kd=float(gains.get('kd', 0.0)),
             nulls=nulls,
+            serial=None if row.get('serial') is None else str(row['serial']),
         ))
     return ArmConfig(
         arm=raw['arm'], path=path, urdf=resolve(raw.get('urdf', 'urdf/arm01/arm01.urdf')),
@@ -185,9 +207,14 @@ class CalibrationStore:
 
     PATTERN = re.compile(r'_v(\d+)\.yaml$')
 
-    def __init__(self, arm: ArmConfig, root: Optional[str] = None):
+    def __init__(self, arm: ArmConfig, root: Optional[str] = None, serial: Optional[str] = None):
+        """serial: one actuator on the bench rig; its versions go to <arm>/<serial>/
+        and carry `actuator_serial`, since Kt and friction vary unit to unit."""
         self.arm = arm
+        self.serial = serial
         self.dir = os.path.join(root or resolve('config/calib'), arm.arm)
+        if serial:
+            self.dir = os.path.join(self.dir, re.sub(r'[^A-Za-z0-9_.-]', '_', str(serial)))
 
     def versions(self) -> List[str]:
         files = glob.glob(os.path.join(self.dir, '*_v*.yaml'))
@@ -219,6 +246,9 @@ class CalibrationStore:
         base['git_sha'] = git_sha()
         base['joint_config_hash'] = self.arm.hash()
         base['stage'] = stage
+        if self.serial:
+            base['actuator_serial'] = str(self.serial)
+            base['actuator_model'] = self.arm.joints[0].model if self.arm.n == 1 else None
         os.makedirs(self.dir, exist_ok=True)
         path = os.path.join(self.dir, '%s_v%d.yaml' % (base['date'], base['version']))
         with open(path, 'w') as f:

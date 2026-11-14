@@ -191,6 +191,7 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | Stage | Command | Writes |
 |---|---|---|
 | 1 Bring up | `arm bringup` | joint config `direction` (with `--write-config`) |
+| 1 Indicator | `arm indicator` | nothing (report: 90° step vs protractor, torque sign, 0x6077 units, nulls) |
 | 2 Zero | `arm zero` | `zero_offsets_rad` |
 | 3 Limits | `arm limits` | `soft_limits_rad` |
 | 4 Torque constant | `arm kt` | `kt_output_nm_per_a` |
@@ -202,6 +203,36 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | Mocap kinematics | `arm mocap-calib` | `zero_offsets_rad`, `kinematic_overlay`, `joint_stiffness_nm_per_rad` |
 | Mocap repeatability | `arm mocap-repeat` | `validation.repeatability_rp_mm` (+ tuned settings to apply) |
 | Release gate | `arm validate` | `validation.*`, report beside the calibration file |
+
+### Single-joint bench (Phases 1 and 2, before the arm is assembled)
+
+`config/arms/bench01.yaml` is one actuator on a stand with a lever on its output
+(`urdf/bench01/bench01.urdf`: shaft horizontal, q = 0 with the lever level, +90° hanging
+down, test masses on a hook 0.25 m out). The same stages run on it; `--arm` takes a name.
+Every actuator, spares included, goes through it, so give its serial and model: results go
+to `config/calib/bench01/<serial>/` and every version carries `actuator_serial`.
+
+```bash
+# Phase 1: bring-up and the indicator check (commands 0° then 90°, you type the protractor
+# reading; also torque sign against gravity, 0x6077 units, and every null left in the joint row)
+arm bringup   --arm bench01 --serial SN123 --model x4_36
+arm indicator --arm bench01 --serial SN123 --model x4_36
+
+# Phase 2: the lever rig, per actuator: zero (lever level), kt on the three hook masses
+# (rig.test_masses_kg for the model), gravity (lever COM), friction, latency; then
+# rig_<date>_v<N>.yaml beside the versions with the gate (Kt linear across 3 loads, friction R² > 0.9)
+arm rig --arm bench01 --serial SN123 --model x4_36
+
+# the same in sim
+arm indicator --sim --arm bench01 --fresh
+arm rig --sim --quick --arm bench01 --serial SIM-1 --fresh
+arm all --sim --quick --arm bench01 --fresh    # every stage; pivot / mocap / validate SKIP on 1 joint
+```
+
+The rig's lever length, hook point and test masses are under `rig:` in `bench01.yaml`; kt uses
+them instead of its default 0.15 m lever and computed loads. On hardware the stages prompt for
+each mass and for the lever-level zero. Hardware runs still need a launch for bench01 (the
+arm01 launch file is hard-wired to arm01's joint table).
 
 Layout:
 

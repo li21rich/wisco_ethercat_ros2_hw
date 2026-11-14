@@ -23,7 +23,7 @@ def gravity_test_pose(model, joint, home, rng, tries=400):
     best, best_g = home.copy(), abs(model.gravity(home)[joint])
     for _ in range(tries):
         q = home.copy()
-        idx = rng.choice(model.n, size=3, replace=False)
+        idx = rng.choice(model.n, size=min(3, model.n), replace=False)
         for i in set(idx) | {joint}:
             span = model.upper[i] - model.lower[i]
             q[i] = np.clip(home[i] + rng.uniform(-0.25, 0.25) * span, model.lower[i] + 5 * DEG,

@@ -54,6 +54,9 @@ class SimErrors:
     jig_reseat_sigma_rad: float = math.radians(0.01)
     current_noise_permille: float = 2.0                # 0x6077 noise, 1 sigma
     mocap_sigma_m: float = 3e-5
+    # true counts per rad / configured (a wrong counts_per_rev, e.g. motor-side
+    # encoder read as output-side); `arm indicator` must catch it
+    counts_scale: Optional[np.ndarray] = None
 
     @staticmethod
     def random(n: int, seed: int = 0, scale: float = 1.0) -> 'SimErrors':
@@ -101,6 +104,7 @@ class SimArm(ArmClient):
         flips = np.array(e.direction_flip if e.direction_flip is not None else [False] * n)
         self.dir_true = np.where(flips, -self.dir_cfg, self.dir_cfg)
         self.kt_scale = np.array(e.kt_scale if e.kt_scale is not None else np.ones(n), float)
+        self.counts_scale = np.array(e.counts_scale if e.counts_scale is not None else np.ones(n), float)
         self.coulomb = np.array(e.coulomb_nm if e.coulomb_nm is not None else z, float)
         self.viscous = np.array(e.viscous_nm_s if e.viscous_nm_s is not None else z, float)
         self.stiction = np.array(e.stiction_extra_nm if e.stiction_extra_nm is not None else z, float)
@@ -176,7 +180,8 @@ class SimArm(ArmClient):
     def _encoder_counts(self) -> np.ndarray:
         drift = self.thermal * (1 - math.exp(-(self.t - self.power_on_t) / self.err.thermal_tau_s))
         motor = self.q + self.deflection
-        return np.round(self.dir_true * (motor + self.true_zero + drift) * self.units.counts_per_rad)
+        return np.round(self.dir_true * (motor + self.true_zero + drift) * self.units.counts_per_rad
+                        * self.counts_scale)
 
     def _measured(self):
         counts = self._encoder_counts()
@@ -254,7 +259,7 @@ class SimArm(ArmClient):
                 # drive PD on its own encoder (true direction, includes the bias)
                 enc = self._encoder_counts()
                 err_counts = self.dir_true * (counts_t - enc)
-                err = err_counts / self.units.counts_per_rad
+                err = err_counts / (self.units.counts_per_rad * self.counts_scale)
                 motor_vel = self.qd
                 tau = self.drive_kp * err - self.drive_kd * motor_vel + tau_cmd
             else:
@@ -360,6 +365,10 @@ class SimArm(ArmClient):
 
     def time_since_power_on(self) -> float:
         return self.t - self.power_on_t
+
+    def true_joint_angles(self) -> np.ndarray:
+        """Sim-only: true link angles (what a dial indicator / protractor reads)."""
+        return self.q.copy()
 
     def true_tool_position(self, frame: Optional[str] = None) -> np.ndarray:
         """Where the tool really is (link angles; encoders see the motor side)."""

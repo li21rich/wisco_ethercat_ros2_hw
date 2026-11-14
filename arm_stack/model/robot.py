@@ -158,7 +158,8 @@ class ArmModel:
         pin.framesForwardKinematics(self.model, self.data, qq)
         J = pin.getFrameJacobian(self.model, self.data, self.model.getFrameId(frame),
                                  pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
-        return J[:, self.vidx]
+        # eigenpy hands back 1-D arrays for some 1-dof shapes; keep (6, nv)
+        return np.asarray(J).reshape(6, self.model.nv)[:, self.vidx]
 
     def ik_position(self, target: np.ndarray, q0: Sequence[float], frame=None, iters=200,
                     tol=1e-6, stay_inside=True) -> np.ndarray:
@@ -190,7 +191,7 @@ class ArmModel:
         return self._from_v(pin.aba(self.model, self.data, self._q(q), self._v(qd), self._v(tau)))
 
     def mass_matrix(self, q) -> np.ndarray:
-        M = pin.crba(self.model, self.data, self._q(q))
+        M = np.asarray(pin.crba(self.model, self.data, self._q(q))).reshape(self.model.nv, self.model.nv)
         M = np.triu(M) + np.triu(M, 1).T
         return M[np.ix_(self.vidx, self.vidx)]
 
@@ -204,6 +205,7 @@ class ArmModel:
         qq = self._q(q)
         Yfull = pin.computeJointTorqueRegressor(self.model, self.data, qq, np.zeros(self.model.nv),
                                                 np.zeros(self.model.nv))
+        Yfull = np.asarray(Yfull).reshape(self.model.nv, -1)    # 1-dof: eigenpy returns 1-D
         # pinocchio orders dynamic parameters per joint as
         # [m, mcx, mcy, mcz, Ixx, Ixy, Iyy, Ixz, Iyz, Izz]
         Y = np.zeros((self.n, 3 * self.n))

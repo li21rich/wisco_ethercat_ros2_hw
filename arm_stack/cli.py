@@ -1,8 +1,11 @@
 """`arm <stage> [--sim]`: one command per calibration stage (spec: Calibration procedures).
 
-  arm bringup | zero | limits | kt | gravity | friction | latency | pivot | pace
+  arm bringup | indicator | zero | limits | kt | gravity | friction | latency | pivot | pace
   arm mocap-calib | mocap-repeat | validate
   arm all --sim                 every stage in order on one sim arm (Phase 0 gate run)
+  arm rig --arm bench01 --serial SN [--model x4_36]
+                                Phase 2 lever rig for one actuator: zero, kt, gravity
+                                (lever COM), friction, latency, stored per serial
   arm status                    latest calibration version and what it holds
   arm export pace SESSION.mcap OUT
   arm export lerobot OUT SESSION.mcap [...]
@@ -14,7 +17,10 @@ stage too, for debugging. Every run is recorded to one MCAP session in
 --log-dir with the calibration version in its meta.
 
 Hardware runs need arm01.launch.py up first; --sim needs nothing but
-Pinocchio and numpy.
+Pinocchio and numpy. --arm takes a path or a name under config/arms/
+(e.g. --arm bench01, the single-joint lever rig). Stages that need more
+joints than the arm has (pivot, mocap, validate on the 1-joint rig) report
+SKIP.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import re
 import sys
 import tempfile
 import time
+import zlib
 from typing import Dict, List
 
 import numpy as np
@@ -37,12 +44,20 @@ from .config import CalibrationStore, calibration_hash, git_sha, load_arm
 from .model.robot import ArmModel
 
 STAGES = [
-    ('bringup', 'bringup'), ('zero', 'zero'), ('limits', 'limits'), ('kt', 'torque_constant'),
+    ('bringup', 'bringup'), ('indicator', 'indicator'), ('zero', 'zero'), ('limits', 'limits'),
+    ('kt', 'torque_constant'),
     ('gravity', 'gravity'), ('friction', 'friction'), ('latency', 'latency'), ('pivot', 'pivot'),
     ('pace', 'pace'), ('mocap-calib', 'mocap_calib'), ('mocap-repeat', 'mocap_repeat'),
     ('validate', 'validate'),
 ]
 MODULES = dict(STAGES)
+# Stages that need an assembled arm: fewer joints -> SKIP with the reason.
+MIN_JOINTS = {'pivot': 4, 'mocap-calib': 6, 'mocap-repeat': 6, 'validate': 6}
+# Phase 2 lever rig, per actuator: zero (lever level), Kt on the hook masses, the lever's
+# COM (friction subtracts its gravity), friction, latency.
+RIG_STAGES = ['zero', 'kt', 'gravity', 'friction', 'latency']
+RIG_KT_LINEARITY = 0.05
+RIG_FRICTION_R2 = 0.9
 SIM_ROOT = os.path.join(os.path.expanduser('~'), '.cache', 'arm_stack', 'sim_calib')
 
 
@@ -62,8 +77,10 @@ def build_model(arm, calibration) -> ArmModel:
 def make_client(args, arm, calibration):
     if args.sim:
         from .sim.arm_sim import SimArm, SimErrors
-        errors = SimErrors.random(arm.n, seed=args.seed, scale=args.error_scale)
-        return SimArm(arm, calibration, errors, seed=args.seed)
+        # each actuator serial gets its own unit-to-unit errors
+        seed = args.seed + (zlib.crc32(args.serial.encode()) % 100000 if args.serial else 0)
+        errors = SimErrors.random(arm.n, seed=seed, scale=args.error_scale)
+        return SimArm(arm, calibration, errors, seed=seed)
     from .hw.ros_client import RosArmClient
     power_on = None
     if args.powered_at:
@@ -79,6 +96,7 @@ def session_meta(arm, store, calibration, client, operator):
         'calibration_hash': calibration_hash(store.latest_path()),
         'joint_config_hash': arm.hash(), 'git_sha': git_sha(),
         'time_since_power_on_s': client.time_since_power_on(), 'operator': operator,
+        'actuator_serial': store.serial, 'actuator_models': [j.model for j in arm.joints],
         'started': dt.datetime.now().isoformat(timespec='seconds'),
     }
 
@@ -102,7 +120,15 @@ def update_joint_config(path: str, updates: Dict[str, Dict]) -> List[str]:
 
 
 def run_stage(name, args, arm, store, client, recorder=None, extra=None):
-    from .calib.common import StageContext
+    from .calib.common import StageContext, skipped
+    need = MIN_JOINTS.get(name)
+    if need and arm.n < need:
+        result = skipped(name, 'skipped: needs an assembled arm (>= %d joints); %s has %d'
+                         % (need, arm.arm, arm.n))
+        print(result.report())
+        if recorder is not None:
+            recorder.event('stage_skipped', stage=name, reason=result.lines[0])
+        return result
     calibration = store.latest()
     if args.sim and hasattr(client, 'reload_calibration'):
         client.reload_calibration(calibration)
@@ -154,20 +180,76 @@ def _plain(o):
 
 
 def cmd_status(args):
-    arm = load_arm(args.arm)
-    store = CalibrationStore(arm, args.calib_root or (SIM_ROOT if args.sim else None))
+    arm = load_arm(args.arm, model=args.model, serial=args.serial)
+    store = CalibrationStore(arm, args.calib_root or (SIM_ROOT if args.sim else None), store_serial(arm))
     path = store.latest_path()
     if not path:
         print('%s: no calibration yet in %s' % (arm.arm, store.dir))
         return 0
     cal = store.latest()
-    print('%s: v%s (%s, stage %s) %s' % (arm.arm, cal.get('version'), cal.get('date'), cal.get('stage'), path))
+    print('%s%s: v%s (%s, stage %s) %s' % (arm.arm, ' actuator %s' % store.serial if store.serial else '',
+                                           cal.get('version'), cal.get('date'), cal.get('stage'), path))
     for key in ('zero_offsets_rad', 'soft_limits_rad', 'kt_output_nm_per_a', 'link_inertials', 'friction',
                 'latency_ms', 'joint_stiffness_nm_per_rad', 'kinematic_overlay', 'pace', 'validation'):
         v = cal.get(key)
         filled = bool(v) and (not isinstance(v, dict) or any(x not in (None, [None, None], {}) for x in v.values()))
         print('  %-28s %s' % (key, 'set' if filled else '-'))
     return 0
+
+
+def store_serial(arm):
+    """Actuator serial for a 1-joint (bench) arm: --serial or the joint row's `serial`."""
+    serials = [j.serial for j in arm.joints if j.serial]
+    if not serials:
+        return None
+    if arm.n != 1:
+        raise SystemExit('--serial / joint serial is for a 1-joint bench arm; %s has %d joints'
+                         % (arm.arm, arm.n))
+    return serials[0]
+
+
+def run_rig(args, arm, store, client, recorder):
+    """Phase 2 lever rig for the mounted actuator; writes a per-serial summary."""
+    print('rig: %s actuator %s (%s): %s' % (arm.arm, store.serial, arm.joints[0].model, ', '.join(RIG_STAGES)))
+    results = {}
+    for name in RIG_STAGES:
+        results[name] = run_stage(name, args, arm, store, client, recorder)
+    cal = store.latest()
+    joint = arm.names[0]
+    kt_m = results['kt'].metrics.get(joint, {})
+    fr_m = results['friction'].metrics.get(joint, {})
+    loads = len(kt_m.get('masses_kg') or [])
+    kt_ok = bool(results['kt'].passed and loads >= 3 and kt_m.get('linearity', 1.0) < RIG_KT_LINEARITY)
+    fr_ok = bool(results['friction'].passed and fr_m.get('r2', 0.0) > RIG_FRICTION_R2)
+    gate = bool(kt_ok and fr_ok and all(r.passed for r in results.values()))
+    summary = {
+        'actuator_serial': store.serial, 'actuator_model': arm.joints[0].model, 'arm': arm.arm,
+        'joint': joint, 'date': dt.date.today().isoformat(), 'sim': bool(args.sim),
+        'calibration_version': cal.get('version'), 'calibration_file': store.latest_path(),
+        'kt_output_nm_per_a': (cal.get('kt_output_nm_per_a') or {}).get(joint),
+        'kt_nominal_nm_per_a': arm.joints[0].kt_nominal_nm_per_a,
+        'kt_linearity': kt_m.get('linearity'), 'kt_loads_kg': kt_m.get('masses_kg'),
+        'kt_per_load': kt_m.get('per_load'),
+        'friction': (cal.get('friction') or {}).get(joint), 'friction_r2': fr_m.get('r2'),
+        'latency_ms': cal.get('latency_ms'),
+        'stages': {n: 'PASS' if r.passed else 'FAIL' for n, r in results.items()},
+        'gate': {'kt_linear_3_loads': kt_ok, 'friction_r2_above_0_9': fr_ok, 'met': gate},
+    }
+    os.makedirs(store.dir, exist_ok=True)
+    path = os.path.join(store.dir, 'rig_%s_v%s.yaml' % (summary['date'], cal.get('version')))
+    with open(path, 'w') as f:
+        f.write('# Written by `arm rig` for actuator %s.\n' % store.serial)
+        yaml.safe_dump(_plain(summary), f, sort_keys=False)
+    print('RIG %s: Kt %s Nm/A (linear across %d loads: %s), friction R^2 %s (> 0.9: %s), latency %s ms -> '
+          'Phase 2 gate %s' % (store.serial, _fmt(summary['kt_output_nm_per_a']), loads, 'yes' if kt_ok else 'NO',
+                               _fmt(summary['friction_r2']), 'yes' if fr_ok else 'NO',
+                               _fmt(summary['latency_ms']), 'MET' if gate else 'NOT MET'))
+    print('  summary %s' % path)
+    return 0 if gate else 1
+
+
+def _fmt(v):
+    return '-' if v is None else '%.4g' % v
 
 
 def cmd_export(args):
@@ -182,11 +264,13 @@ def cmd_export(args):
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog='arm', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('stage', choices=[s for s, _ in STAGES] + ['all', 'status', 'export'])
+    p.add_argument('stage', choices=[s for s, _ in STAGES] + ['all', 'rig', 'status', 'export'])
     p.add_argument('paths', nargs='*', help='export: kind and files')
     p.add_argument('--sim', action='store_true', help='run on the sim backend')
     p.add_argument('--quick', action='store_true', help='fewer poses and cycles (smoke runs)')
-    p.add_argument('--arm', default='config/arms/arm01.yaml', help='joint config')
+    p.add_argument('--arm', default='config/arms/arm01.yaml', help='joint config path or name (bench01)')
+    p.add_argument('--serial', default=None, help='bench: serial of the actuator on the rig')
+    p.add_argument('--model', default=None, help='bench: actuator model on the rig (x4_10, x4_36, x6_60)')
     p.add_argument('--calib-root', default=None, help='calibration store root (default config/calib)')
     p.add_argument('--log-dir', default=None, help='MCAP session directory (default ~/arm_logs)')
     p.add_argument('--no-log', action='store_true')
@@ -211,13 +295,24 @@ def main(argv=None) -> int:
         args.paths = args.paths[1:]
         return cmd_export(args)
 
-    arm = load_arm(args.arm)
+    arm = load_arm(args.arm, model=args.model, serial=args.serial)
+    serial = store_serial(arm)
+    if args.stage == 'rig':
+        if arm.n != 1:
+            p.error('arm rig is the single-joint lever rig (--arm bench01); %s has %d joints' % (arm.arm, arm.n))
+        if not serial:
+            if not args.sim:
+                p.error('arm rig needs the actuator serial: --serial SN (label on the housing)')
+            serial = 'sim-%d' % args.seed
+            arm = load_arm(args.arm, model=args.model, serial=serial)
+    args.serial = serial
     root = args.calib_root or (SIM_ROOT if args.sim else None)
     if args.sim and args.fresh:
         root = tempfile.mkdtemp(prefix='arm_sim_calib_')
-    store = CalibrationStore(arm, root)
+    store = CalibrationStore(arm, root, serial)
     calibration = store.latest()
-    if calibration.get('version') in (None, 0) and not args.sim and args.stage not in ('bringup', 'zero', 'all'):
+    if calibration.get('version') in (None, 0) and not args.sim and args.stage not in (
+            'bringup', 'indicator', 'zero', 'all', 'rig'):
         print('warning: no calibration file yet for %s; run arm bringup and arm zero first' % arm.arm)
     client = make_client(args, arm, calibration)
     recorder = None
@@ -251,6 +346,8 @@ def main(argv=None) -> int:
                 ok &= r.passed
             print('ALL STAGES %s' % ('PASS' if ok else 'had failures'))
             return 0 if ok else 1
+        if args.stage == 'rig':
+            return run_rig(args, arm, store, client, recorder)
         r = run_stage(args.stage, args, arm, store, client, recorder, extra)
         return 0 if r.passed else 1
     finally:
