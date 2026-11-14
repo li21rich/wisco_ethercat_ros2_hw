@@ -1,0 +1,63 @@
+# Per-model actuator data for MyActuator RMD-X EtherCAT drives.
+#
+# This is the ONLY place model numbers live. The launch file generates every
+# drive's slave config, the ros2_control block and the command controller's
+# limits from this file plus config/joints.yaml and the calibration file.
+#
+# Values marked "verify" have not been measured on the bench yet.
+
+defaults:
+  vendor_id: 0x00202008
+  product_id: 0x00000000
+  # DC SYNC0 activation word written by the master (MyActuator's guide says to
+  # run the drives DC-synchronous). Verify against the drive's ESI file; set to
+  # 0 to fall back to free-run if a drive will not reach OP with DC enabled.
+  dc_assign_activate: 0x0300
+
+models:
+  x4_10:
+    counts_per_rev: 131072            # 0x6064 counts per output revolution (verify: output or motor side)
+    # 0x6077 / 0x6071 scale: Nm per per-mille of rated current.
+    # verify: 1000 x 0.015 = 15 Nm rated, which is above peak_effort_nm.
+    effort_nm_per_permille: 0.015
+    peak_effort_nm: 10.0
+    max_velocity_rad_s: 24.9
+    # Bring-up limits enforced by the command controller and the drive.
+    bringup_velocity_limit_rad_s: 2.0
+    bringup_effort_limit_nm: 2.5
+    max_torque_permille: 250          # 0x6072, drive-side torque cap
+    damping_nm_s_per_rad: 0.2         # effort mode: damping applied when commands stop
+    k_stiction: 0.35                  # used by multiple_act_command.py
+
+  x4_36:
+    counts_per_rev: 131072
+    effort_nm_per_permille: 0.03565   # verify: 35.65 Nm rated, above peak_effort_nm
+    peak_effort_nm: 34.0
+    max_velocity_rad_s: 8.7
+    bringup_velocity_limit_rad_s: 2.0
+    bringup_effort_limit_nm: 6.0
+    max_torque_permille: 250
+    damping_nm_s_per_rad: 0.5
+    k_stiction: 0.90
+
+  x6_60:
+    counts_per_rev: 131072
+    effort_nm_per_permille: 0.039375  # verify
+    peak_effort_nm: 60.0
+    max_velocity_rad_s: 16.0
+    bringup_velocity_limit_rad_s: 2.0
+    bringup_effort_limit_nm: 12.0
+    max_torque_permille: 450
+    damping_nm_s_per_rad: 1.0
+    k_stiction: 1.50
+
+  x8_120:
+    counts_per_rev: 131072
+    effort_nm_per_permille: 0.045     # verify
+    peak_effort_nm: 120.0
+    max_velocity_rad_s: 13.3
+    bringup_velocity_limit_rad_s: 2.0
+    bringup_effort_limit_nm: 25.0
+    max_torque_permille: 800
+    damping_nm_s_per_rad: 2.0
+    k_stiction: 2.80

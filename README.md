@@ -1,212 +1,205 @@
 # WiscoHumanoids Hardware Interface
 
-Demos: 
+Demos:
 https://drive.google.com/file/d/1t2eEQImacynxiRTeHf_oAAU96mAUvgAz/view
 https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view
 
-This repository contains the physical hardware configuration, PDO mapping, demo scripts, and ROS 2 launch files required to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
+ros2_control bring-up for MyActuator RMD X-series drives (CiA402 over EtherCAT) using
+[ICube ethercat_driver_ros2](https://github.com/ICube-Robotics/ethercat_driver_ros2).
+This package is the base of the arm control stack: the arm's controllers are
+ros2_control plugins that run on top of the hardware interface defined here.
 
-Currently, it serves as a test bench demonstrating single- or multi-servo control (specifically MyActuator RMD X-Series motors) using ROS 2 Jazzy and ethercat_driver_ros2 on a standard Linux laptop (which will be replaced by the RK3588 in the final implementation). Because this demo was developed on a machine without a PREEMPT_RT kernel patch, it is configured to run at 100Hz rather than the intended 1kHz.
+Today it runs a test bench of four left-arm drives (2× X4-10, 2× X4-36) at 100 Hz on a
+laptop without PREEMPT_RT. The target is the RK3588 as real-time EtherCAT master, with a
+Jetson Orin (v1) sending task-level targets over DDS.
 
-## System Architecture
+## Quick start
 
-RK3588 (Real-Time Control & Hardware Interface)
+```bash
+# ethercat_driver_ros2 must be in the same workspace (or installed)
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install && source install/setup.bash
 
-On the RK3588, the software stack is split into static hardware definitions (this repository) and dynamically loaded mathematical control plugins:
+# Without drives: everything on mock hardware
+ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py use_mock_hardware:=true
+
+# With drives (EtherCAT master running, drives powered)
+sudo systemctl start ethercat
+ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
+```
+
+To run without sudo, give the EtherCAT device to your user:
+
+```bash
+echo 'KERNEL=="EtherCAT[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-ethercat.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The launch file starts the hardware, `joint_state_broadcaster` and one command
+controller. It does **not** move anything on its own: pass `demo:=true` to also start
+the demo script for the selected mode.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `joints_file` | `config/joints.yaml` | Joint table (see below) |
+| `models_file` | `config/actuator_models.yaml` | Per-model numbers |
+| `calibration_file` | `config/calibration.yaml` | Per-joint zero offsets |
+| `control_mode` | from the joint table | `velocity` (CSV) or `effort` (CST) |
+| `update_rate` | `100` | Controller manager rate **and** EtherCAT cycle, Hz |
+| `joint_state_rate` | `100` | `/joint_states` rate, Hz (capped at `update_rate`) |
+| `command_timeout` | `0.1` | Seconds without a command before the joints are stopped |
+| `use_mock_hardware` | `false` | Run the drives on `mock_components/GenericSystem` (velocity commands move the joints; effort commands are only echoed to the effort state) |
+| `demo` | `false` | Start `multi_velocity_cmd.py` (velocity) or `multiple_act_command.py` (effort) |
+
+## One joint table
+
+Everything that depends on the wiring is generated at launch from three files:
+
+- **`config/joints.yaml`**: one row per drive: URDF joint name, `bus_position` (its
+  physical place on the ring, 0 = first after the master), `model` and `direction`
+  (±1, so a positive command moves the joint positively about its URDF axis). Optional
+  per-joint overrides: `max_velocity_rad_s`, `max_effort_nm`, `max_torque_permille`,
+  `damping_nm_s_per_rad`, `soft_limits_rad`, `k_stiction`. Also holds `control_mode`.
+- **`config/actuator_models.yaml`**: encoder counts, torque scale, peak torque, speed,
+  bring-up limits and the 0x6072 torque cap per model, plus vendor id and DC sync.
+- **`config/calibration.yaml`**: zero offsets, so joint angle = direction × encoder −
+  offset. The drives have no home-offset object, so the offset is folded into the
+  PDO scale factors.
+
+From these the launch file writes, into a temp directory that is removed on shutdown:
+
+- one slave config per drive (from `config/drive_pdo_template.yaml`) with that drive's
+  scale factors, direction, zero offset, mode of operation and torque cap,
+- the hardware manifest the xacro reads to build the `ros2_control` block (ring order
+  is the table's, in any mix of models), and
+- the controller parameters: joint list, per-joint command limit, position limits from
+  the URDF (or `soft_limits_rad`), damping.
+
+The table is checked before anything starts: unknown joints or models, duplicate or
+non-contiguous bus positions, bad directions and calibration entries for joints not in
+the URDF all stop the launch with a message. Warnings (no zero offset, suspicious torque
+scale) are printed. URDF joints not in the table run on mock hardware (state only), so
+`/joint_states` always covers the whole robot.
+
+**Adding or moving a drive** is one row in `config/joints.yaml`. Then run the bring-up
+check (below).
+
+**Switching CSV ↔ CST** is `control_mode` in the table or `control_mode:=effort` at
+launch. The drive mode (SDO and 0x6060), the commanded PDO channel, the exported command
+interface and the controller all follow. Commands go to
+`/velocity_controller/commands` (rad/s) or `/effort_controller/commands` (Nm) as
+`std_msgs/Float64MultiArray`, one value per joint in table order.
+
+## Command controller
+
+Both controllers are `wisco_ethercat_ros2_hw/SafeCommandController`, a forward
+controller with the checks the stock ones lack:
+
+- **Timeout**: no command for `command_timeout` → velocity 0, or in effort mode a
+  damping torque (never a push). A crashed or stalled script stops the arm.
+- **Magnitude**: each joint is clamped to its `max_command` (bring-up limits from the
+  model table unless overridden).
+- **Soft position limits**: within `soft_margin` (0.1 rad) of a limit, motion toward it
+  is scaled down to zero at the limit; past a limit, outward commands are dropped and
+  in effort mode outward motion is damped. Moving back in is always allowed. In effort
+  mode this cannot stop a joint that gravity pushes through a limit; mechanical stops
+  and the 0x6072 cap are still needed.
+- **Bad input**: NaN commands are treated as stale; arrays of the wrong length are
+  ignored with a warning; the joints are stopped on activate and deactivate.
+
+Only the selected mode's command interface is exported, so nothing can command the
+other one by accident.
+
+## Bring-up procedure
+
+1. `ros2 run wisco_ethercat_ros2_hw check_urdf.py` (offline). Reports left/right axis,
+   limit, effort and velocity mismatches and URDF limits that disagree with the wired
+   actuator model.
+2. `ethercat slaves`: every drive is in PREOP/OP and the count matches the table.
+3. Launch in velocity mode with the arm clear, then
+   `ros2 run wisco_ethercat_ros2_hw bringup_check.py`. It jogs each drive in bus order
+   and checks that only the named joint moved, by about the commanded amount, in the
+   commanded direction, and asks you to confirm the right physical joint moved the
+   right way. A failure means a wrong `bus_position` or `direction`.
+4. Zero each joint at its URDF zero pose and record the offsets in
+   `config/calibration.yaml` (bump `version`). Until then, position limits assume the
+   encoder zero is the URDF zero, and the launch file says so.
+5. Only then raise the bring-up limits in the model table or per joint.
+
+## Real-time setup (for 1 kHz)
+
+- PREEMPT_RT kernel; run `ros2_control_node` with RT priority (`limits.conf`: `rtprio`
+  and `memlock` for your user).
+- Isolate a core for the control loop (`isolcpus=`/`nohz_full=`) and pin the EtherCAT
+  NIC's IRQs to it (`/proc/irq/*/smp_affinity`).
+- Set `update_rate:=1000`: the launch file uses the same value for the EtherCAT
+  `control_frequency`, so they cannot drift apart.
+- Leave `joint_state_rate` at 100–250 Hz; the controllers read state interfaces
+  directly, and a 1 kHz JointState stream only loads DDS.
+- DC sync is on (`dc_assign_activate: 0x0300` in the model table). Check that value
+  against the drive's ESI on the bench; `0` turns DC off.
+
+## Architecture
 
 ```text
 wisco_ws/src/
-├── ethercat_driver_ros2/          # (add separately, you need to install this for it to work github.com/ICube-Robotics/ethercat_driver_ros2)
-│
-├── wisco_ethercat_ros2_hw/        # <----- (THIS REPO: Hardware configuration)
-│   ├── config/rmd_x4_10.yaml      #      Hexadecimal PDO maps & gear ratios
-│   ├── config/rmd_x4_36.yaml      #      Hexadecimal PDO maps & gear ratios
-│   ├── config/rmd_x6_60.yaml      #      Hexadecimal PDO maps & gear ratios
-│   ├── config/rmd_x8_120.yaml     #      Hexadecimal PDO maps & gear ratios
-│   ├── config/controllers.yaml    #      Dictates which controllers to load
-│   ├── launch/test_bench.launch.py 
-│   ├── urdf/test_bench.urdf.xacro #      Physical robot description & slave IDs
-│   └── README.md                  # (you are here)
-│
-└── wisco_controllers/             # (C++ controls stack to be added separately later along with the rest of the humanoid)
-    ├── include/wisco_controllers/
-    │   └── wbc_controller.hpp     # Class headers, Eigen matrix declarations
-    └── src/
-        └── wbc_controller.cpp     # The 1kHz QP solver, Pinocchio rigid body dynamics, etc.
+├── ethercat_driver_ros2/          # ICube, add separately
+└── wisco_ethercat_ros2_hw/        # this package
+    ├── config/joints.yaml              # joint -> bus position, model, direction
+    ├── config/actuator_models.yaml     # per-model numbers
+    ├── config/calibration.yaml         # zero offsets
+    ├── config/drive_pdo_template.yaml  # PDO map shared by all RMD-X drives
+    ├── launch/test_bench.launch.py     # generates configs, starts everything
+    ├── urdf/test_bench.urdf.xacro      # robot + ros2_control block from the manifest
+    ├── src/safe_command_controller.cpp # command controller (pluginlib)
+    ├── wisco_ethercat_ros2_hw/         # Python: config generation, ROS helpers
+    └── scripts/                        # demos, bring-up check, URDF check
 
-ros2_control (controller_manager process, same process as hw_interface)
-├── ethercat_driver_ros2 (SystemInterface) ── 14x RMD-X4-10 CiA 402
-├── wbc_controller plugin
-└── State/Command Interfaces (hardware interface exposed by ethercat_driver_ros2, consumed/written by wbc_controller)
-```
-Runtime Process Structure on RK3588:
-```text
-ROS 2 (minimal) on RK3588
-└── Command surface exposed by wbc_controller (action/topic for
-    Cartesian/task targets) — receives targets from Jetson Thor
+ros2_control_node (one RT process)
+├── EthercatDriver (SystemInterface): one CiA402 drive per row of joints.yaml
+├── joint_state_broadcaster
+└── SafeCommandController (velocity or effort), later the arm controllers
 ```
 
-Jetson Thor (High-Level AI. Shown here for context):
-```text
-jetson_ws/src/
-└── wisco_policy/
-    ├── wisco_policy/
-    │   └── policy_node.py              # RL locomotion policy / MPC
-    └── launch/
-        └── policy.launch.py
+Controller plan: first a joint PD + gravity/friction feedforward controller plugin
+(same process, reads the state interfaces, writes effort), validated on the bench; then
+task-space control; a whole-body QP only once that works. The Jetson sends targets to
+the controller's command topic at 50–100 Hz over DDS; it is not in the RT loop.
 
-ROS 2 (full) on Jetson Thor
-├── MoveIt 2 / AI pipeline
-├── RL locomotion policy / MPC
-├── Vision / SLAM
-└── Sends high-level targets (50–100Hz) over DDS ──┐
-                                                     │
-                                                     v
-                               ROS 2 DDS Network (non-RT link)
-                                                     │
-                                                     v
-                     RK3588: wbc_controller's ROS 2 command surface
-```
+Hardware notes: all drives currently share one EtherCAT ring, so one bad connector
+stops the whole arm. Route cables so each joint's connector can be reseated without
+disassembly, and watch the working counter (`ethercat domains`).
 
-## Quick Start 
+## Scripts
 
-Note: In the commands below, ~/Code is used as a placeholder for the parent directory containing your wisco_ws workspace.
+| Script | Mode | What it does |
+|---|---|---|
+| `multi_velocity_cmd.py` | velocity | Swings each joint around its start position (position tracking, so no drift), amplitude capped by the limits |
+| `multiple_act_command.py` | effort | Feedforward torque wave sized from each joint's `k_stiction` |
+| `example_torque_command_ros_node` | effort | Pulses one joint (`-p joint:=...`) to break stiction |
+| `bringup_check.py` | velocity | Wiring and direction check, see above |
+| `check_urdf.py` | offline | URDF symmetry and actuator-limit check |
+| `example_ros_node` (C++) | n/a | Minimal node that listens on `/effort_controller/commands` |
 
-```bash
-# Source the ROS 2 environment and build from the workspace root (e.g., ~/Code/wisco_ws):
-source /opt/ros/jazzy/setup.bash
+The scripts read the joint list and limits from the running controller, so they always
+agree with what it will enforce. They publish zeros on exit; the controller's timeout
+stops the joints anyway if a script dies.
 
-colcon build --symlink-install && source ~/Code/wisco_ws/install/setup.bash 
-# ^ Build After any changes you make
+## Known open items (need the bench, CAD or datasheet)
 
-""" 
-Starting will require sudo so the EtherCAT driver can access the raw /dev/EtherCAT0 network device. To run without sudo use: 
-$ echo 'KERNEL=="EtherCAT[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-ethercat.rules
-$ sudo udevadm control --reload-rules && sudo udevadm trigger
-It is also recommended to configure limits.conf
-"""
+- Torque scale (`effort_nm_per_permille`) for X4-10 and X4-36 implies more than the
+  rated torque at 1000 ‰; measure Kt and fix. Effort readings and CST commands are
+  suspect until then.
+- URDF: the right arm was exported in a different pose (elbow, forearm and wrist axes
+  do not mirror the left), left/right wrist pitch effort and velocity disagree, and the
+  shoulder effort/velocity limits do not match the X4-10s wired there. See
+  `check_urdf.py`.
+- Whether 0x6064 reports the output-side or motor-side encoder (the scale factors
+  assume output side, 2^17 counts per output revolution).
 
-# Starting the EtherCAT kernel module (make sure the slave is connected)
-systemctl start ethercat
-# Launch ros2_control and hardware interface
-ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
-```
+## Debugging
 
-By default, test_bench.launch.py runs the CSV velocity wave controller (`multi_velocity_cmd.py`) which sends sinusoidal velocity commands to the motors.
-
-rviz2 is recommended to visualize the servo state in real-time.
-
-You can also run scripts manually in a separate terminal:
-```bash
-# CSV velocity wave (current default)
-ros2 run wisco_ethercat_ros2_hw multi_velocity_cmd.py
-
-# Legacy torque pulse tester (for CST mode)
-ros2 run wisco_ethercat_ros2_hw multiple_act_command_executable
-```
-
-
-
-## Demo Scripts
-
-The package includes helper scripts to test actuator response without launching the full stack:
-
-- **`multi_velocity_cmd.py`**: CSV velocity wave controller (current default, publishes to `/velocity_controller/commands`)
-- **`multiple_act_command.py`**: Legacy torque pulse tester for many motors (for CST mode, publishes to `/effort_controller/commands`)
-- **`example_torque_command_ros_node.py`**: Legacy single-motor torque stiction breaker (deprecated)
-- **`example_ros_node`** (C++): Minimal ROS API awaiting torque commands on `/effort_controller/commands` (preparation for CST)
-
-## Operation Mode Note
-
-The servo configurations (`config/rmd_*.yaml`) are currently set to **Cyclic Synchronous Velocity (CSV, mode of operation 9)** for development and testing. The final implementation should use **Cyclic Synchronous Torque (CST, mode of operation 10)**.
-
-Before moving to CST in the final implementation, apply all of the following:
-
-### 1. Motor configs (`config/rmd_*.yaml` — all 4 files)
-```yaml
-# SDO: set drive mode at startup
-sdo:
-  - {index: 0x6060, sub_index: 0, type: int8, value: 10}  # CST
-
-# RPDO: command torque on 0x6071, disable velocity on 0x60ff
-rpdo:
-  - index: 0x1600
-    channels:
-      - {index: 0x6040, sub_index: 0, type: uint16, default: 0}
-      - {index: 0x607a, sub_index: 0, type: int32, default: 0}
-      - {index: 0x60ff, sub_index: 0, type: int32, default: 0}  # No command interface (CSV target velocity)
-      - {index: 0x6071, sub_index: 0, type: int16, command_interface: effort, factor: <motor_factor>, default: 0}  # Target torque
-      - {index: 0x6072, sub_index: 0, type: int16, default: 1000}
-      - {index: 0x6060, sub_index: 0, type: int8, command_interface: mode_of_operation, default: 10}  # CST
-      - {index: 0x2ffd, sub_index: 0, type: uint8, default: 0}
-```
-Use the motor-specific `factor` for effort (e.g., `66.667` for x4_10, `28.05` for x4_36, `25.397` for x6_60, `22.222` for x8_120).
-
-### 2. URDF (`urdf/test_bench.urdf.xacro`)
-```xml
-<!-- Top of file: disable velocity, enable effort -->
-<xacro:property name="effort_map" value="enabled"/>
-<xacro:property name="velocity_map" value="disabled"/>
-<xacro:property name="yaml_map" value="disabled"/>
-```
-The `actuator_joint` macro already conditionally exposes `effort` when `effort_map != 'disabled'`.
-
-### 3. Controllers (`config/controllers.yaml`)
-```yaml
-controller_manager:
-  ros__parameters:
-    update_rate: 100  # or 1000 with PREEMPT_RT
-
-    joint_state_broadcaster:
-      type: joint_state_broadcaster/JointStateBroadcaster
-
-    effort_controller:
-      type: effort_controllers/JointGroupEffortController
-```
-
-### 4. Launch file (`launch/test_bench.launch.py`)
-```python
-# Spawn effort_controller, not velocity_controller
-Node(
-    package='controller_manager',
-    executable='spawner',
-    arguments=['effort_controller', '--controller-manager', '/controller_manager'],
-),
-```
-The dynamic joint injection already targets `effort_controller` (see `generate_launch_description()`).
-
-### 5. Topic / API
-- Torque commands go to `/effort_controller/commands` (std_msgs/Float64MultiArray)
-- The `example_ros_node` C++ API already subscribes to this topic and holds the latest torque commands
-- `multiple_act_command.py` (legacy) publishes torque waveforms to this topic
-
-### 6. Verify
-```bash
-# Build and launch
-colcon build --symlink-install && source install/setup.bash
-ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py
-
-# Check drive mode in joint_states
-ros2 topic echo /joint_states | grep mode_of_operation  # should show 10
-
-# Verify effort_controller is active
-ros2 control list_controllers
-```
-
-### Estimated effort
-~15 minutes for a clean switch if all files are updated together. The main risk is forgetting one of the 4 motor configs or the URDF property — use the checklist above.
-
-## To add/update actuators in use:
-1. test_bench.launch.py: update the actuator list
-2. controllers.yaml: update the joint list
-3. launch multiple_act_command and adjust override params
-
-## Useful Debugging Commands
-
-Open a second (sourced) terminal while the launch file is running to inspect the real-time loop:
-
-* List active ROS2 topics: `ros2 topic list` (some of these you must be sudo)
-* Stream live motor telemetry (pos/vel/effort): `ros2 topic echo /joint_states`
-* Command torque manually (for example_torque_command_ros_node.py only): `ros2 topic pub /effort_controller/commands std_msgs/msg/Float64MultiArray "{data: [0.5]}"`
-* Check domains: `ethercat domains` (i.e. for 3 actuators it should say "Domain0: LogBaseAddr 0x00000000, Size  96, WorkingCounter 9/9")
-* Latency analysis: `ros2 topic hz /joint_states` (publish rate, min/max latency, and standard deviation)
+- `ros2 control list_controllers` / `ros2 control list_hardware_interfaces`
+- `ros2 topic echo /joint_states`
+- `ethercat slaves`, `ethercat domains` (working counter should be N/N)
+- `ros2 topic hz /joint_states`
