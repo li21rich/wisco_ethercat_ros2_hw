@@ -108,6 +108,13 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_arm_controller_mock
     controller_interface hardware_interface rclcpp rclcpp_lifecycle std_msgs)
 
+  # C++ GravityModel (the controller's) against the Python ArmModel (sim,
+  # calibration): golden file written by tools/make_parity_golden.py.
+  ament_add_gtest(test_gravity_parity test/test_gravity_parity.cpp)
+  target_link_libraries(test_gravity_parity wisco_ethercat_ros2_hw_arm_controller yaml-cpp)
+  target_compile_definitions(test_gravity_parity PRIVATE
+    WISCO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
   ament_add_pytest_test(test_arm_stack test/arm_stack
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} TIMEOUT 900)
 
