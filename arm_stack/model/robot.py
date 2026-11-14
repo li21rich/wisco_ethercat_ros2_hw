@@ -176,6 +176,17 @@ class ArmModel:
                 q = np.clip(q, self.lower, self.upper)
         return q
 
+    def ik(self, target, q_seed: Sequence[float], method: str = 'clik', **opts):
+        """6-DOF (or masked) IK of the tool frame; thin wrapper over arm_stack.model.ik.solve.
+
+        target: pin.SE3, a 4x4 matrix, or a 3-vector (position only).
+        method: 'clik' (default, null-space posture), 'lm', 'dls' or 'multistart'.
+        Returns an ik.IKResult (q, success, pos_err, rot_err, iters, time); q is
+        always inside the joint limits.
+        """
+        from . import ik as _ik
+        return _ik.solve(self, target, q_seed, method=method, **opts)
+
     # ------------------------------------------------------------------ dynamics
     def gravity(self, q: Sequence[float]) -> np.ndarray:
         return self._from_v(pin.computeGeneralizedGravity(self.model, self.data, self._q(q)))
