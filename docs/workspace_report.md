@@ -40,7 +40,7 @@ Suggested ISO 9283 poses: cube side 160 mm centered at (0.180, -0.540, 0.060); P
 | P4 | (0.244, -0.476, 0.124) | -71, 92, -47, 114, 31, -20, -42 | 0.0074 | 0.079 | 24 | 9 deg (shoulder_pitch) |
 | P5 | (0.244, -0.604, 0.124) | -18, 84, -22, 53, 51, 22, -50 | 0.0067 | 0.040 | 44 | 13 deg (wrist_pitch) |
 
-For `validation.iso_poses_rad` in config/arms/arm01.yaml (not applied):
+For `validation.iso_poses_rad` in config/arms/arm01.yaml (applied):
 
 ```yaml
 iso_poses_rad:
