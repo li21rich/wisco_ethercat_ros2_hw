@@ -75,7 +75,7 @@ def residuals(model, Q, T):
 def run(ctx: StageContext, n_fit: int = None, n_test: int = 10) -> StageResult:
     client, arm = ctx.client, ctx.arm
     model = ctx.model.copy()
-    n_fit = n_fit or (16 if ctx.quick else 32)
+    n_fit = n_fit or (min(16, 4 + 4 * model.n) if ctx.quick else 32)   # 3 params per link
     n_test = 6 if ctx.quick else n_test
     home = safe_home(model)
     peak_g = model.peak_gravity_torque()

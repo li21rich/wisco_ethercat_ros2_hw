@@ -30,7 +30,11 @@ def run(ctx: StageContext, reseats: int = 5) -> StageResult:
     cpr = np.array([j.counts_per_rev for j in arm.joints], float) / (2 * np.pi)
     samples = []
     for k in range(reseats):
-        client.place_in_jig(q_jig)
+        try:
+            client.place_in_jig(q_jig)
+        except NotImplementedError:
+            input('Re-seat %d/%d: put the arm in the zeroing jig (%s), then press Enter '
+                  % (k + 1, reseats, ', '.join('%s %.1f deg' % (n, v / DEG) for n, v in zip(arm.names, q_jig))))
         reads = []
         n_reads = 1000 if not ctx.sim else 50
         for _ in range(n_reads):

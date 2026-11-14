@@ -23,7 +23,7 @@ import pinocchio as pin
 
 from ..control.motion import Trace, move_to, stream
 from ..hw.client import Payload
-from .common import DEG, StageContext, StageResult, safe_home
+from .common import DEG, StageContext, StageResult, mount_payload, safe_home
 
 DATASHEET_TOL = 0.15
 LINEARITY_TOL = 0.05
@@ -31,6 +31,20 @@ LEVER_M = 0.15
 LOAD_FRACTIONS = (0.15, 0.30, 0.45)     # of the joint's max torque
 SWEEP = 6 * DEG
 SPEED = 0.05                            # rad/s
+
+
+def rig_setup(arm, model, j):
+    """(hook offset, test masses or None) from the joint config's `rig:` block when
+    it describes joint j's child link (the bench lever), else (None, None)."""
+    rig = arm.raw.get('rig') or {}
+    if not rig or rig.get('lever_link') != model.link_names()[j]:
+        return None, None
+    offset = rig.get('hook_offset_m')
+    masses = rig.get('test_masses_kg')
+    if isinstance(masses, dict):
+        masses = masses.get(arm.joints[j].model)
+    return (None if offset is None else np.array(offset, float),
+            None if not masses else [float(m) for m in masses])
 
 
 def _lever_offset(model, j):
@@ -107,7 +121,8 @@ def run(ctx: StageContext) -> StageResult:
         spec = arm.joints[j]
         name = spec.name
         link = model.link_names()[j]
-        offset = _lever_offset(model, j)
+        rig_offset, rig_masses = rig_setup(arm, model, j)
+        offset = rig_offset if rig_offset is not None else _lever_offset(model, j)
         q0, unit_t = best_pose(model, j, home, offset, ctx.rng)
         if unit_t < 0.05:
             flags.append('%s: no pose gives the lever a gravity moment; run it on the bench rig' % name)
@@ -115,7 +130,7 @@ def run(ctx: StageContext) -> StageResult:
             continue
         peak = np.array([s.peak_torque_nm for s in arm.joints])
         g = np.abs(model.gravity(q0))
-        client.set_payload(None)
+        mount_payload(ctx, None)
         clamp = np.minimum(peak, g + 0.3 * peak)
         i0 = swept_current(ctx, j, q0, clamp)
         dtaus, dis = [0.0], [0.0]
@@ -130,16 +145,24 @@ def run(ctx: StageContext) -> StageResult:
         if not np.isfinite(m_max) or m_max * unit_t < 0.1 * spec.max_torque_nm:
             flags.append('%s: little torque headroom at the lever pose (%.2f Nm of load); run it on the '
                          'bench rig' % (name, m_max * unit_t if np.isfinite(m_max) else 0.0))
+        if rig_masses and max(rig_masses) > m_max * 1.001:
+            # the rig's real weights are used as they are; past the headroom they are flagged
+            flags.append('%s: rig mass %.2f kg exceeds the %.2f kg the torque limit allows here'
+                         % (name, max(rig_masses), m_max))
         m_max = min(m_max, max(fractions) * spec.max_torque_nm / unit_t)
-        for frac in fractions:
-            mass = (frac / max(fractions)) * max(m_max, 0.1 * spec.max_torque_nm / unit_t)
-            client.set_payload(Payload(link, mass, offset))
+        if rig_masses:
+            masses = rig_masses
+        else:
+            masses = [(frac / max(fractions)) * max(m_max, 0.1 * spec.max_torque_nm / unit_t)
+                      for frac in fractions]
+        for mass in masses:
+            mount_payload(ctx, Payload(link, mass, offset))
             tau_load = load_torque(model, q0, link, mass, offset)
             clamp = np.minimum(peak, g + np.abs(tau_load) + 0.3 * peak)
             i_load = swept_current(ctx, j, q0, clamp)
             dtaus.append(tau_load[j])
             dis.append(i_load - i0)
-        client.set_payload(None)
+        mount_payload(ctx, None)
         dtaus, dis = np.array(dtaus), np.array(dis)
         # line through the unloaded point and the 3 loads, intercept free (the
         # unloaded current is one measurement; forcing it through the origin
@@ -156,7 +179,10 @@ def run(ctx: StageContext) -> StageResult:
         ok &= good
         kt_out[name] = kt
         metrics[name] = {'kt': kt, 'nominal': nominal, 'deviation': dev, 'linearity': lin,
-                         'per_load': each.tolist()}
+                         'per_load': each.tolist(), 'masses_kg': [float(m) for m in masses],
+                         'lever_offset_m': [float(x) for x in offset]}
+        if spec.serial:
+            metrics[name]['actuator_serial'] = spec.serial
         lines.append('%-15s Kt %.4f Nm/A (datasheet %.4f, %+.1f%%), linearity %.1f%%%s' % (
             name, kt, nominal, 100 * (kt / nominal - 1), 100 * lin, '' if good else '  <-- FAIL'))
         if kt <= 0:

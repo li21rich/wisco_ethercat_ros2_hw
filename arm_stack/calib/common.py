@@ -40,13 +40,18 @@ class StageResult:
     lines: List[str] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
     joint_config_updates: Dict[str, Any] = field(default_factory=dict)
+    skipped: bool = False            # not applicable to this arm (counts as passed)
 
     def report(self) -> str:
-        head = '%s: %s' % (self.stage, 'PASS' if self.passed else 'FAIL')
+        head = '%s: %s' % (self.stage, 'SKIP' if self.skipped else ('PASS' if self.passed else 'FAIL'))
         out = [head] + ['  ' + l for l in self.lines]
         if self.flags:
             out += ['  flag: ' + f for f in self.flags]
         return '\n'.join(out)
+
+
+def skipped(stage: str, why: str) -> StageResult:
+    return StageResult(stage, True, {'skipped': True, 'reason': why}, {}, [why], skipped=True)
 
 
 def safe_home(model: ArmModel) -> np.ndarray:
