@@ -28,7 +28,7 @@ ament_target_dependencies(wisco_ethercat_ros2_hw_controllers
   std_msgs)
 
 # --- ArmController: the arm's 1 kHz Mode P / Mode T loop (arm_law.hpp + Pinocchio gravity) ---
-add_library(wisco_ethercat_ros2_hw_arm_controller SHARED src/arm_controller.cpp)
+add_library(wisco_ethercat_ros2_hw_arm_controller SHARED src/arm_controller.cpp src/gravity_model.cpp)
 target_compile_features(wisco_ethercat_ros2_hw_arm_controller PUBLIC cxx_std_17)
 target_include_directories(wisco_ethercat_ros2_hw_arm_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
