@@ -15,6 +15,25 @@
 //
 // Interfaces per joint: command position, effort, torque_offset,
 // mode_of_operation; state position, velocity, effort.
+//
+// drive_feedback (parameter, default false) also claims the state interfaces
+// status_word (0x6041) and mode_of_operation (0x6061 display) per joint:
+//   * while any drive is not OPERATION_ENABLED (fault, quick stop, still
+//     enabling) the arm runs the fallback (gravity comp + damping, CST) and
+//     the disabled joint's CSP target tracks its actual position, so
+//     re-enabling never steps the drive to a stale target;
+//   * until the drive reports a requested CSP <-> CST switch in 0x6061, the
+//     torque goes in 0x60B2 (added in both modes per CiA402), so a drive that
+//     switches a few cycles late never runs a cycle without it, and the CSP
+//     ease-in waits for the drive to be in CSP.
+// It needs the drive's ros2_control joint to export those state interfaces
+// (0x6041 / 0x6061 with state_interface: in the slave config); tested against
+// test/mock/ (test_arm_controller_mock.cpp).
+//
+// CSP re-entry (always): the target eases in from the actual position over
+// blend_s (arm::ease_in) before the max_velocity rate limit, so a drive that
+// differentiates 0x607A for velocity feedforward sees no velocity step.
+// Blends and eases count control periods (update()'s period), not wall time.
 #ifndef WISCO_ETHERCAT_ROS2_HW__ARM_CONTROLLER_HPP_
 #define WISCO_ETHERCAT_ROS2_HW__ARM_CONTROLLER_HPP_
 
@@ -77,13 +96,17 @@ private:
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>> rt_state_;
 
   std::vector<Ref> cmd_pos_, cmd_eff_, cmd_off_, cmd_mode_;
-  std::vector<StateRef> st_pos_, st_vel_, st_eff_;
+  std::vector<StateRef> st_pos_, st_vel_, st_eff_, st_status_, st_mode_;
+  bool drive_feedback_ = false;
 
   // preallocated per-cycle buffers
   std::vector<double> q_, qd_, tau_meas_, g_, tau_switch_, q_target_prev_;
+  std::vector<double> q_switch_;     // per joint: where the CSP target eases in from
+  std::vector<double> since_ease_;  // per joint: s of control cycles since that ease started
+  std::vector<bool> enabled_;
   arm::LawOutput out_;
   int last_mode_ = -1;
-  int64_t switch_ns_ = 0;
+  double since_switch_ = 0.0;        // s of control cycles since the last P <-> T switch
 };
 
 }  // namespace wisco_ethercat_ros2_hw

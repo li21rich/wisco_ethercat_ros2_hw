@@ -163,6 +163,18 @@ inline double rate_limit(double previous, double target, double max_step)
   return previous + std::clamp(target - previous, -max_step, max_step);
 }
 
+// CSP re-entry: eases the target from the actual position at the switch to
+// the law's target over blend_s (smoothstep: zero velocity at both ends), so
+// a drive that feeds forward the target velocity (d 0x607A / dt) sees no step.
+// Applied before rate_limit(). C++ only so far; arm_stack/sim/arm_sim.py
+// rate-limits without it (its drive model has no velocity feedforward).
+inline double ease_in(double at_switch, double target, double since_switch_s, double blend_s)
+{
+  if (since_switch_s >= blend_s || blend_s <= 0.0) {return target;}
+  const double a = std::max(since_switch_s, 0.0) / blend_s;
+  return at_switch + (target - at_switch) * a * a * (3.0 - 2.0 * a);
+}
+
 // CST torque: blends from the measured torque at the switch over blend_s.
 inline double blend(double measured_at_switch, double target, double since_switch_s, double blend_s)
 {

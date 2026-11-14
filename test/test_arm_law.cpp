@@ -172,3 +172,16 @@ TEST(ArmLaw, BumplessHelpers)
   EXPECT_DOUBLE_EQ(blend(2.0, 4.0, 0.01, 0.02), 3.0);
   EXPECT_DOUBLE_EQ(blend(2.0, 4.0, 0.05, 0.02), 4.0);
 }
+
+// C++ only (no Python mirror yet): CSP re-entry ease, zero slope at both ends.
+TEST(ArmLaw, EaseInStartsAndEndsAtRest)
+{
+  using wisco_ethercat_ros2_hw::arm::ease_in;
+  EXPECT_DOUBLE_EQ(ease_in(1.0, 2.0, 0.0, 0.02), 1.0);
+  EXPECT_DOUBLE_EQ(ease_in(1.0, 2.0, 0.01, 0.02), 1.5);
+  EXPECT_DOUBLE_EQ(ease_in(1.0, 2.0, 0.03, 0.02), 2.0);
+  EXPECT_DOUBLE_EQ(ease_in(1.0, 2.0, 0.0, 0.0), 2.0);
+  const double h = 1e-7;
+  EXPECT_NEAR((ease_in(0.0, 1.0, h, 0.02) - ease_in(0.0, 1.0, 0.0, 0.02)) / h, 0.0, 1e-2);
+  EXPECT_NEAR((ease_in(0.0, 1.0, 0.02, 0.02) - ease_in(0.0, 1.0, 0.02 - h, 0.02)) / h, 0.0, 1e-2);
+}

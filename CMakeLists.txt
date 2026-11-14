@@ -88,6 +88,26 @@ if(BUILD_TESTING)
   ament_add_gtest(test_arm_law test/test_arm_law.cpp)
   target_include_directories(test_arm_law PRIVATE include)
 
+  # Mock RMD-X drives on a mock EtherCAT ring (test/mock/), so the CiA402
+  # state machine and the RT core run before the drives arrive.
+  add_library(wisco_mock_ethercat STATIC
+    test/mock/rmdx_mock_slave.cpp
+    test/mock/mock_ethercat_system.cpp)
+  set_target_properties(wisco_mock_ethercat PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_features(wisco_mock_ethercat PUBLIC cxx_std_17)
+  target_include_directories(wisco_mock_ethercat PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/mock ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  ament_target_dependencies(wisco_mock_ethercat hardware_interface rclcpp)
+
+  ament_add_gtest(test_mock_slave test/test_mock_slave.cpp)
+  target_link_libraries(test_mock_slave wisco_mock_ethercat)
+
+  ament_add_gtest(test_arm_controller_mock test/test_arm_controller_mock.cpp TIMEOUT 300)
+  target_link_libraries(test_arm_controller_mock
+    wisco_mock_ethercat wisco_ethercat_ros2_hw_arm_controller wisco_ethercat_ros2_hw_controllers)
+  ament_target_dependencies(test_arm_controller_mock
+    controller_interface hardware_interface rclcpp rclcpp_lifecycle std_msgs)
+
   ament_add_pytest_test(test_arm_stack test/arm_stack
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} TIMEOUT 900)
 
