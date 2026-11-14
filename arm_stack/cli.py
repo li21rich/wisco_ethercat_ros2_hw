@@ -6,6 +6,12 @@
   arm rig --arm bench01 --serial SN [--model x4_36]
                                 Phase 2 lever rig for one actuator: zero, kt, gravity
                                 (lever COM), friction, latency, stored per serial
+  arm float [--lock J,..] [--friction-gain G] [--damping D] [--payload KG@x,y,z]
+            [--duration S] [--record [PATH]]
+                                teach / hand-guide in gravity comp (control/float_mode.py)
+  arm gravity-check [--payload KG@x,y,z]
+                                float drift -> gravity residual per joint, and the largest
+                                friction help that does not creep (float_friction_gain)
   arm status                    latest calibration version and what it holds
   arm export pace SESSION.mcap OUT
   arm export lerobot OUT SESSION.mcap [...]
@@ -51,6 +57,7 @@ STAGES = [
     ('validate', 'validate'),
 ]
 MODULES = dict(STAGES)
+MODULES['gravity-check'] = 'gravity_check'     # a check, not part of `arm all`
 # Stages that need an assembled arm: fewer joints -> SKIP with the reason.
 MIN_JOINTS = {'pivot': 4, 'mocap-calib': 6, 'mocap-repeat': 6, 'validate': 6}
 # Phase 2 lever rig, per actuator: zero (lever level), Kt on the hook masses, the lever's
@@ -102,18 +109,30 @@ def session_meta(arm, store, calibration, client, operator):
 
 
 def update_joint_config(path: str, updates: Dict[str, Dict]) -> List[str]:
-    """Targeted edit of `direction:` lines in the joint YAML, keeping comments."""
+    """Targeted edit of per-joint `direction:` (bringup) and `float_friction_gain:`
+    (gravity-check) lines in the joint YAML, keeping comments. A missing
+    float_friction_gain line is added under the joint's name."""
     done = []
-    directions = updates.get('direction') or {}
-    if not directions:
+    if not any((updates.get(k) or {}) for k in ('direction', 'float_friction_gain')):
         return done
     text = open(path).read()
-    for joint, value in directions.items():
+    for joint, value in (updates.get('direction') or {}).items():
         pat = re.compile(r'(-\s*name:\s*%s\b(?:(?!\n\s*-\s*name:).)*?\n\s*direction:\s*)(-?1)' % re.escape(joint),
                          re.S)
         text, k = pat.subn(lambda m: m.group(1) + str(int(value)), text, count=1)
         if k:
             done.append('%s direction -> %+d' % (joint, value))
+    for joint, value in (updates.get('float_friction_gain') or {}).items():
+        v = '%.2f' % float(value)
+        pat = re.compile(r'(-\s*name:\s*%s\b(?:(?!\n\s*-\s*name:).)*?\n\s*float_friction_gain:[ \t]*)([^\s#]+)'
+                         % re.escape(joint), re.S)
+        text, k = pat.subn(lambda m: m.group(1) + v, text, count=1)
+        if not k:
+            pat = re.compile(r'^([ \t]*-[ \t]*)(name:[ \t]*%s\b[^\n]*\n)' % re.escape(joint), re.M)
+            text, k = pat.subn(lambda m: m.group(0) + ' ' * len(m.group(1)) + 'float_friction_gain: %s\n' % v,
+                               text, count=1)
+        if k:
+            done.append('%s float_friction_gain -> %s' % (joint, v))
     with open(path, 'w') as f:
         f.write(text)
     return done
@@ -264,7 +283,8 @@ def cmd_export(args):
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog='arm', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('stage', choices=[s for s, _ in STAGES] + ['all', 'rig', 'status', 'export'])
+    p.add_argument('stage', choices=[s for s, _ in STAGES] + ['gravity-check', 'float', 'all', 'rig', 'status',
+                                                               'export'])
     p.add_argument('paths', nargs='*', help='export: kind and files')
     p.add_argument('--sim', action='store_true', help='run on the sim backend')
     p.add_argument('--quick', action='store_true', help='fewer poses and cycles (smoke runs)')
@@ -284,6 +304,14 @@ def main(argv=None) -> int:
     p.add_argument('--repo-id', default='WiscoHumanoidsLab/arm01-teleop')
     p.add_argument('--fps', type=int, default=50)
     p.add_argument('--fresh', action='store_true', help='sim: start from an empty sim calibration store')
+    p.add_argument('--payload', default=None, help='float, gravity-check: KG@x,y,z point mass in tool0 (m)')
+    p.add_argument('--lock', default=None, help='float: joints held still (names, indices or 0/1 mask)')
+    p.add_argument('--friction-gain', default=None, help='float: Coulomb help, fraction (< 1; default: '
+                   'joint config float_friction_gain, else 0.6); one value or one per joint')
+    p.add_argument('--damping', default=None, help='float: viscous damping, Nm s/rad (default 0)')
+    p.add_argument('--duration', type=float, default=None, help='float: seconds (default: until Ctrl-C)')
+    p.add_argument('--record', nargs='?', const='', default=None,
+                   help='float: record every cycle to MCAP (PATH, or a _teach file in --log-dir)')
     args = p.parse_args(argv)
 
     if args.stage == 'status':
@@ -316,17 +344,18 @@ def main(argv=None) -> int:
         print('warning: no calibration file yet for %s; run arm bringup and arm zero first' % arm.arm)
     client = make_client(args, arm, calibration)
     recorder = None
-    if not args.no_log:
+    if not args.no_log or args.record is not None:
         from .log.recorder import Recorder, RecordingClient, SessionRejected
         log_dir = args.log_dir or os.path.join(os.path.expanduser('~'), 'arm_logs')
-        name = '%s_%s_%s%s.mcap' % (arm.arm, dt.datetime.now().strftime('%Y%m%d_%H%M%S'), args.stage,
-                                    '_sim' if args.sim else '')
+        name = '%s_%s_%s%s%s.mcap' % (arm.arm, dt.datetime.now().strftime('%Y%m%d_%H%M%S'), args.stage,
+                                      '_teach' if args.record is not None else '', '_sim' if args.sim else '')
         meta = session_meta(arm, store, calibration, client, args.operator or getpass.getuser())
         if meta['calibration_version'] is None:
             meta['calibration_version'] = 0
         try:
-            recorder = Recorder(os.path.join(log_dir, name), meta)
-            client = RecordingClient(client, recorder, every=10 if args.sim else 1)
+            recorder = Recorder(args.record or os.path.join(log_dir, name), meta)
+            # --record (teaching): every cycle, on the sim too
+            client = RecordingClient(client, recorder, every=10 if args.sim and args.record is None else 1)
         except (ImportError, SessionRejected) as e:
             print('warning: not recording (%s)' % e)
             recorder = None
@@ -336,7 +365,15 @@ def main(argv=None) -> int:
         from .log.recorder import command_array, load_session
         trajs = [command_array(load_session(path), 'q')['q'] for path in args.replay]
         extra = {'replay_trajectories': trajs, 'replay_dt': client.cmd_dt}
+    if args.stage == 'gravity-check':
+        from .control.float_mode import parse_payload
+        extra = {'payload': parse_payload(args.payload)}
     try:
+        if args.stage == 'float':
+            from .control.float_mode import cli_run
+            if args.sim and hasattr(client, 'reload_calibration'):
+                client.reload_calibration(calibration)
+            return cli_run(args, arm, build_model(arm, calibration), client, recorder)
         if args.stage == 'all':
             if not args.sim:
                 p.error('arm all runs on the sim only; run hardware stages one at a time')

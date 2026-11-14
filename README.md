@@ -203,6 +203,43 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | Mocap kinematics | `arm mocap-calib` | `zero_offsets_rad`, `kinematic_overlay`, `joint_stiffness_nm_per_rad` |
 | Mocap repeatability | `arm mocap-repeat` | `validation.repeatability_rp_mm` (+ tuned settings to apply) |
 | Release gate | `arm validate` | `validation.*`, report beside the calibration file |
+| Float check | `arm gravity-check` | joint config `float_friction_gain` (with `--write-config`) |
+
+### Float (teach / hand guiding) and gravity-check
+
+```bash
+arm float                                   # Ctrl-C ends it: damps to a stop, then a Mode P hold
+arm float --lock shoulder_pitch,shoulder_roll --payload 0.8@0,0,0.05 --record   # MCAP every cycle
+arm float --sim --duration 4                # sim: an operator pushes tool0 sideways, then lets go
+arm gravity-check [--payload KG@x,y,z] [--write-config]
+```
+
+`arm float` (`arm_stack/control/float_mode.py`) runs Mode T with kp = 0: RT gravity comp
+(plus the payload), Coulomb help `float_friction_gain x Fc x ramp(|qd|)` with a 0.02 rad/s
+deadband and a 0.03 rad/s smoothstep ramp (zero at rest, so it cannot start a drift; gain < 1,
+so a joint let go always stops), optional `--damping` (RT kd), and spring-damper walls from
+10° inside the soft limits. Safety: any joint above 0.5 x `max_vel` latches strong damping
+(no friction help) until all are below 0.25 x for 0.2 s; every command carries the bring-up
+torque clamp; the 50 ms watchdog is unchanged. `--lock` holds joints with a stiff RT PD
+(5 x / 2 x the joint gains) plus a slow integrator: the controller switches CSP/CST for the
+whole arm, so a per-joint Mode P hold is not available. `--friction-gain` (one value or one
+per joint) overrides the joint config's `float_friction_gain` (default 0.6).
+
+`--payload KG@x,y,z` is a point mass in the tool0 frame. It rides on the command as an
+optional trailing `[kg, x, y, z]` block (`ArmController` keeps it, adds it to the inertia of
+tool0's parent link, and uses it in Mode P, Mode T and the watchdog fallback; kg 0 clears it,
+commands without the block leave it; parameter `payload_frame`, default tool0). Float and
+gravity-check always send one (none without `--payload`), so it is never left from an
+earlier session.
+
+`arm gravity-check` (`arm_stack/calib/gravity_check.py`), complementing validate's hold test:
+1. at N poses (6, `--quick` 3) the arm floats with no friction help or damping for 3 s; per
+   joint, the drift's acceleration through the mass matrix (with armature) plus the friction
+   model gives the gravity residual; > 5% of peak gravity is flagged. Joints that do not move
+   are reported as below the breakaway.
+2. per joint, others locked: a torque kick each way, then float at gain g; bisection for the
+   largest g that still stops within 2 s (above the breakaway the joint creeps), and 0.9 x that
+   is the recommended `float_friction_gain`, written to the joint config by `--write-config`.
 
 ### Single-joint bench (Phases 1 and 2, before the arm is assembled)
 
@@ -245,15 +282,18 @@ Layout:
   controller. Mode P = CSP target (0x607A) + gravity/friction torque offset (0x60B2);
   Mode T = CST host PD + feedforward (0x6071). Pinocchio gravity from `robot_description` plus
   the calibration file, soft limits, torque/velocity clamps, bumpless switching, and a 50 ms
-  watchdog that drops to gravity comp + damping. `~/command` and `~/state` layouts are in
-  `arm_controller.hpp`.
+  watchdog that drops to gravity comp + damping (with the payload, if one was sent).
+  `~/command` and `~/state` layouts are in `arm_controller.hpp`.
 - `arm_stack/`: Python. `calib/` (stages), `control/` (the same law in Python, trajectories),
   `hw/` (ArmClient API; `ros_client.py` for the arm), `sim/` (sim backend with injectable
   errors), `model/` (Pinocchio model + calibration), `pace/` (CMA-ES, replay backend, GP-BO),
   `log/` (MCAP recorder, exports), `cli.py`.
 
 Tests: `test/test_arm_law.cpp` (gtest) and `test/arm_stack/` (pytest, same law cases in
-Python, optimizers, ISO 9283, recorder). The Phase 0 gate (every procedure recovers its
+Python, optimizers, ISO 9283, recorder; `test_float.py`: float and gravity-check in sim, about
+1 min). The sim's operator hooks are `SimArm.apply_external_force` / `apply_external_torque`;
+its Coulomb + stiction is a velocity-level impulse (sticks below the breakaway, no tanh chatter
+creeping light joints). The Phase 0 gate (every procedure recovers its
 injected errors in sim) is `ARM_PHASE0_GATE=1 python3 -m pytest test/arm_stack/test_phase0_gate.py`.
 
 Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slave (0x6040/0x6041
@@ -262,7 +302,8 @@ state machine, CSP/CST, 0x6072, a one-joint model, injectable faults, lost frame
 not in the workspace, so it is not linked), and `MockEthercatSystem` is a ros2_control
 `SystemInterface` over both. `test_mock_slave` tests the drive and master logic;
 `test_arm_controller_mock` runs the real `ArmController` and `SafeCommandController` against it
-(enable, fault and reset, CSP/CST switching, the 50 ms watchdog, torque clamps, rejections).
+(enable, fault and reset, CSP/CST switching, the 50 ms watchdog, torque clamps, rejections,
+the payload block in gravity and in the watchdog fallback).
 The mock's guesses about the RMD-X are the `RmdxParams` fields marked "guess".
 `ArmController`'s `drive_feedback` (default off) needs `status_word` (0x6041) and
 `mode_of_operation` (0x6061) state interfaces on each drive joint, which the ros2_control

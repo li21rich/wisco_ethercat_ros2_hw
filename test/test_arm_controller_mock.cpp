@@ -111,6 +111,7 @@ std::vector<rclcpp::Parameter> arm_params(bool drive_feedback, bool write_max_to
     rclcpp::Parameter("blend_s", 0.02),
     rclcpp::Parameter("robot_description", std::string(kUrdf)),
     rclcpp::Parameter("drive_feedback", drive_feedback),
+    rclcpp::Parameter("payload_frame", std::string("link2")),   // no tool0 in this URDF
   };
 }
 
@@ -293,6 +294,69 @@ TEST_F(ArmMock, WatchdogFallsBackToGravityCompAndDamping)
 }
 
 // --------------------------------------------------------------------------
+// Payload: the optional trailing [kg, x, y, z] block (a point mass in
+// payload_frame, link2 here) goes into g(q): the Mode P feedforward, and the
+// watchdog fallback after the commands stop. Old-length commands keep it;
+// kg = 0 clears it.
+TEST_F(ArmMock, PayloadInGravityAndWatchdogFallback)
+{
+  constexpr double kMp = 0.6, kPx = 0.2;   // kg, m along link2's x
+  auto with_payload = [](const std::vector<double> & q) {
+      auto g = gravity_at(q);
+      const double c1 = std::cos(q[0]), c12 = std::cos(q[0] + q[1]);
+      g[0] += -kG * kMp * (kL1 * c1 + kPx * c12);
+      g[1] += -kG * kMp * kPx * c12;
+      return g;
+    };
+  Arm a = make_arm(false);
+  a.h->hw().set_load_model([&](const std::vector<double> & q, std::vector<double> & g) {
+      const auto w = with_payload(q);
+      g[0] = w[0];
+      g[1] = w[1];
+    });
+  const std::vector<double> q0 = {0.2, -0.3};
+  auto loaded = command(kModeP, q0);
+  loaded.insert(loaded.end(), {kMp, kPx, 0.0, 0.0});
+  a.h->stream(loaded);
+  a.h->cycle(300);
+  for (size_t i = 0; i < 2; ++i) {
+    ASSERT_EQ(a.cmd(i).mode_of_operation, cia402::kModeCsp) << "payload command accepted";
+    EXPECT_NEAR(a.cmd(i).torque_offset, with_payload(a.q_meas())[i], 1e-6);
+    EXPECT_NEAR(a.q(i), q0[i], 0.01);
+  }
+  ASSERT_GT(std::fabs(with_payload(q0)[0] - gravity_at(q0)[0]), 1.0);
+
+  // an old-length command leaves the payload in
+  a.h->stream(command(kModeP, q0));
+  a.h->cycle(50);
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_NEAR(a.cmd(i).torque_offset, with_payload(a.q_meas())[i], 1e-6);
+  }
+
+  // watchdog: commands stop -> gravity comp WITH the payload + damping, and it holds
+  a.h->stop_stream();
+  for (int k = 0; k < 2000 && a.cmd(0).mode_of_operation != cia402::kModeCst; ++k) {a.h->cycle();}
+  ASSERT_EQ(a.cmd(0).mode_of_operation, cia402::kModeCst);
+  a.h->cycle(40);   // past the 20 ms blend
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_NEAR(a.cmd(i).effort, with_payload(a.q_meas())[i] - kKdFallback[i] * a.st(i).velocity, 1e-6);
+  }
+  a.h->cycle(400);
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_NEAR(a.q(i), q0[i], 0.02) << "fallback must hold the loaded arm, joint " << i;
+  }
+
+  // kg 0 clears it (the load is still there; check what is commanded)
+  auto cleared = command(kModeP, q0);
+  cleared.insert(cleared.end(), {0.0, 0.0, 0.0, 0.0});
+  a.h->stream(cleared);
+  a.h->cycle(100);
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_NEAR(a.cmd(i).torque_offset, gravity_at(a.q_meas())[i], 1e-6);
+  }
+}
+
+// --------------------------------------------------------------------------
 // CSP <-> CST: Mode P hold -> Mode T hold -> Mode P hold under gravity, no
 // torque step at either switch. With drive feedback this holds even when the
 // drive takes 3 cycles to act on 0x6060.
@@ -440,6 +504,12 @@ TEST_F(ArmMock, ArmControllerRejectsUnsafeCommands)
   // wrong length: ignored, stays in the fallback
   auto bad = command(kModeP, q0);
   bad.pop_back();
+  a.h->stream(bad);
+  a.h->cycle(20);
+  EXPECT_EQ(a.cmd(0).mode_of_operation, cia402::kModeCst);
+  // a short payload block is the wrong length too
+  bad = command(kModeP, q0);
+  bad.insert(bad.end(), {0.5, 0.1});
   a.h->stream(bad);
   a.h->cycle(20);
   EXPECT_EQ(a.cmd(0).mode_of_operation, cia402::kModeCst);
