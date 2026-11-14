@@ -7,6 +7,10 @@ friction, encoder bias, delay, and the drive's CSP gains when the joint
 config does not give them. Link inertials stay at their stage 5 values (the
 current calibration's model).
 
+With the drive gains known, the replay also simulates the held joints under
+their CSP loops through the hold-pose mass matrix (pace/backend.py), so the
+chirped joint's drag on them does not end up in its armature and viscous fit.
+
 Pass: every joint's fit converges (cost drop > 90%, RMS error under 10% of
 the chirp amplitude), and the fitted delay (median over joints) is within
 one sim step of the stage 7 latency.
@@ -90,8 +94,21 @@ def decimate(log: JointLog, k: int) -> JointLog:
                     log.sweep, log.freq)
 
 
-def fit(model, arm, logs, generations=60, popsize=14, seed=0, backend='joint', drive_gains=None):
-    sim = (IsaacLabBackend if backend == 'isaac' else JointReplayBackend)(model, logs)
+def armature_prior(ctx) -> np.ndarray:
+    """Rotor armature for the joints held during another joint's chirp: the last PACE
+    fit, else the nominal per-model value. It enters only through the coupling."""
+    from .gravity_check import armature
+    return armature(ctx)
+
+
+def fit(model, arm, logs, generations=60, popsize=14, seed=0, backend='joint', drive_gains=None,
+        hold_armature=None):
+    if backend == 'isaac':
+        sim = IsaacLabBackend(model, logs)
+    else:
+        # with the drive gains known, the held joints are simulated too (coupled
+        # replay), with their rotor armature from hold_armature
+        sim = JointReplayBackend(model, logs, hold_gains=drive_gains, hold_armature=hold_armature)
     maps, opts = [], []
     for k, log in enumerate(logs):
         spec = arm.joints[log.joint]
@@ -143,7 +160,7 @@ def run(ctx: StageContext, backend: str = 'joint') -> StageResult:
     k = 2
     gains = ctx.client.drive_gains()
     fits = fit(ctx.model, arm, [decimate(l, k) for l in logs], generations=150 if ctx.quick else 300,
-               backend=backend, drive_gains=gains)
+               backend=backend, drive_gains=gains, hold_armature=armature_prior(ctx))
     sim_dt = float((arm.raw.get('pace') or {}).get('sim_dt_s', 0.002))
     lines, flags = [], []
     if gains is None:
