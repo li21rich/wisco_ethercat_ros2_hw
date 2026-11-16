@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
+#include "controller_interface/version.h"
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
@@ -56,7 +57,11 @@ public:
     hardware_interface::HardwareInfo info;
     info.name = "EtherCATSystem";
     info.type = "system";
+#if CONTROLLER_INTERFACE_VERSION_MAJOR >= 4   // Jazzy and newer
     info.hardware_plugin_name = "mock/MockEthercatSystem";
+#else                                        // Humble
+    info.hardware_class_type = "mock/MockEthercatSystem";
+#endif
     info.hardware_parameters = hw_params;
     for (const auto & j : joints) {
       hardware_interface::ComponentInfo c;
@@ -104,6 +109,7 @@ public:
       .parameter_overrides(params)
       .allow_undeclared_parameters(true)
       .automatically_declare_parameters_from_overrides(true);
+#if CONTROLLER_INTERFACE_VERSION_MAJOR >= 4   // Jazzy and newer
     controller_interface::ControllerInterfaceParams ci_params;
     ci_params.controller_name = name;
     ci_params.robot_description = "";
@@ -114,6 +120,11 @@ public:
     if (controller_->init(ci_params) != controller_interface::return_type::OK) {
       return false;
     }
+#else                                        // Humble
+    if (controller_->init(name, "", options) != controller_interface::return_type::OK) {
+      return false;
+    }
+#endif
     if (controller_->configure().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
       return false;
     }
