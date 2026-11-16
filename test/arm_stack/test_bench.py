@@ -123,6 +123,34 @@ def test_limits_find_stops(rig):
     assert abs(hi - rig['sim'].stop_upper[0]) < 1.0 * DEG
 
 
+def test_limits_without_hard_stops_keeps_the_urdf_range(rig, monkeypatch):
+    """`hard_stops: false` (arm01 J1): no search past the URDF range; the soft limits
+    are the URDF range and the confirm sweep still reaches both ends."""
+    from arm_stack.calib import limits
+    from arm_stack.model.robot import ArmModel
+
+    def no_search(*a, **k):
+        raise AssertionError('searched for a stop on a joint with hard_stops: false')
+    monkeypatch.setattr(limits, 'find_stop', no_search)
+    joint = rig['arm'].joints[0]
+    joint.hard_stops = False
+    try:
+        r = run(rig, 'limits', client=rig['sim'])
+    finally:
+        joint.hard_stops = True
+    assert r.passed, r.report()
+    assert r.metrics['hard_stops_rad']['bench_joint'] is None
+    urdf = ArmModel(rig['arm'].urdf, rig['arm'].names)
+    assert r.writes['soft_limits_rad']['bench_joint'] == pytest.approx([urdf.lower[0], urdf.upper[0]])
+    assert any('hard_stops: false' in f for f in r.flags)
+
+
+def test_arm01_j1_has_no_hard_stops():
+    from arm_stack.config import load_arm
+    arm = load_arm('arm01')
+    assert [j.name for j in arm.joints if not j.hard_stops] == ['shoulder_pitch']
+
+
 def test_full_arm_stages_skip(rig):
     from arm_stack.cli import run_stage
     for name in ('pivot', 'mocap-calib', 'mocap-repeat', 'validate'):

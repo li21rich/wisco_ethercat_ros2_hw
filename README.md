@@ -503,7 +503,7 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | Powered arm check | `arm bringup --soak-s 10` with the powered launch running | PASS/FAIL report for confirmed small jogs and holding |
 | 1 Indicator | `arm indicator` | nothing (report: 90° step vs protractor, torque sign, 0x6077 units, nulls) |
 | Optional jig re-zero | `arm zero` with motor enabling disabled | `zero_offsets_rad` |
-| Optional powered stop search | `arm limits` | `soft_limits_rad` |
+| Optional powered stop search | `arm limits` | `soft_limits_rad` (3° inside each stop; the URDF range for a `hard_stops: false` joint) |
 | 4 Torque constant | `arm kt` | `kt_output_nm_per_a` |
 | 5 Gravity comp | `arm gravity --fit-masses` | `link_inertials`, gravity-fit validation |
 | 6 Friction | `arm friction` | `friction` |
@@ -586,7 +586,7 @@ Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slav
 Assumptions that need the bench (also in the URDF ledger):
 
 - Zeros and signs are the CAD export's operating coordinates (mapped from its Onshape mates), not encoder readings: `arm commission` measures the initial encoder coordinates and usable limits, `arm zero` supports subsequent jig-based re-zeroing, and hardware `arm bringup` checks small individually confirmed jogs (J3 is mounted inverted, so its `direction` may need to be −1). **q = 0 is the arm stretched out forward**, its worst gravity load, so the model-based calibration stages use `home_pose_rad` in `arm01.yaml` (J1 +90°, elbow +45°: upper arm hanging, peg tip 10 cm above the stand's base plate), which is also the default jig pose. Hanging fully straight (or at the export's CAD capture, J1 80.8, J4 19.7, J5 −95, J6 28°) the peg tip is level with the base plate.
-- Ranges are the export's operating ROM (J1 −90..+180, J2 0..190, J3 ±90, J4 0..130, J5 ±90, J6 ±35, J7 ±90°), not certified stops: J1's stops are unverified, J2's contact onset is at −0.1° and J6's at ±35.1°. `arm limits` finds the real stops.
+- Ranges are the export's operating ROM (J1 −90..+180, J2 0..190, J3 ±90, J4 0..130, J5 ±90, J6 ±35, J7 ±90°), not certified stops: J1's stops are unverified, J2's contact onset is at −0.1° and J6's at ±35.1°. `arm limits` finds the real stops, except on J1: CAD found no J1 stop, so `hard_stops: false` in `arm01.yaml` keeps −90..+180° as its soft limits and `arm limits` never drives it past them (only the cables would stop it).
 - The wrist is a near-parallelogram (output/crank 0.996..1.004): the J6 encoder drives `wrist_pitch` (the output pivot) 1:1, within 0.25° over ±35°; the crank and coupler are mimic joints. The export's `model.py` has the exact loop.
 - Link masses are the export's audited model (provisional actuator masses, solid PLA peg, 178 g harness estimate; moving mass 3.92 kg) until the weighed values land in `link_masses_kg`.
 - The ArmController writes each command's torque clamp to 0x6072 (`max_torque` command interface, `write_max_torque: true` in arm mode), so the drive's own CSP loop is capped too, which matters when `arm limits` pushes into a hard stop. 0x6072 is in the default RxPDO 0x1600 (MyActuator ESI). **0x6072 = 0 is the drive's stall-current limit, not zero torque**, so the controller never writes less than 1% of the joint's `max_torque`.

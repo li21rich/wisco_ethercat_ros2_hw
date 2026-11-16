@@ -47,6 +47,10 @@ joints:
     bus_position: 0
     model: x6_60
     direction: 1
+    # The CAD export found no intrinsic J1 stop (clear at -93 and +183 deg); -90..+180
+    # are mate limits. `arm limits` keeps them as the soft limits instead of driving
+    # J1 past them into the cables. Remove once a physical stop is fitted.
+    hard_stops: false
     gear_ratio: 19.612  # datasheet
     counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)

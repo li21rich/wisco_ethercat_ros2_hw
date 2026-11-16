@@ -68,8 +68,14 @@ def test_zero_recovers_offsets(rig):
 def test_limits_find_stops_past_urdf(rig):
     r = run(rig, 'limits')
     assert r.passed, r.report()
+    from arm_stack.model.robot import ArmModel
+    urdf = ArmModel(rig['arm'].urdf, rig['arm'].names)
     stops = r.metrics['hard_stops_rad']
     for i, n in enumerate(rig['arm'].names):
+        if not rig['arm'].joints[i].hard_stops:      # J1: no stop search, soft = URDF range
+            assert stops[n] is None, n
+            assert r.writes['soft_limits_rad'][n] == pytest.approx([urdf.lower[i], urdf.upper[i]]), n
+            continue
         lo, hi = stops[n]
         assert abs(hi - rig['sim'].stop_upper[i]) < 1.0 * DEG, n
         assert abs(lo - rig['sim'].stop_lower[i]) < 1.0 * DEG, n

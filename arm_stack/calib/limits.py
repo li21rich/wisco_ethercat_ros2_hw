@@ -1,5 +1,9 @@
 """Stage 3, `arm limits`: find the hard stops, set soft limits 3 deg inside.
 
+A joint with `hard_stops: false` in the arm config (no physical stop, only cables)
+is not driven past its URDF range: its soft limits are the URDF range, and the
+sweep below still checks it reaches both ends.
+
 Each joint moves slowly toward each URDF limit and on past it in Mode P, with
 gravity feedforward and 0x6072 clamped to the model gravity torque plus a
 margin. Confirm contact from sustained low speed and measured torque in the
@@ -82,6 +86,16 @@ def run(ctx: StageContext) -> StageResult:
     stops = {}
     ok = True
     for j, name in enumerate(arm.names):
+        if not arm.joints[j].hard_stops:
+            # No physical stop to find (config `hard_stops: false`): driving past the
+            # URDF range would only meet the cables. The URDF range is the soft limit.
+            soft[name] = [float(model.lower[j]), float(model.upper[j])]
+            stops[name] = None
+            lines.append('%-15s no hard stops (hard_stops: false) -> soft = URDF [%+7.2f, %+7.2f] deg'
+                         % (name, model.lower[j] / DEG, model.upper[j] / DEG))
+            flags.append('%s: no stop search (hard_stops: false); soft limits are the URDF range, '
+                         'check the cable routing reaches it' % name)
+            continue
         found = []
         for direction in (-1, +1):
             end = (model.upper[j] + SEARCH_BEYOND) if direction > 0 else (model.lower[j] - SEARCH_BEYOND)
