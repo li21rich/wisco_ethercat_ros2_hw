@@ -6,15 +6,15 @@ https://drive.google.com/file/d/1zwNxs48vFlNf9jD_jDFN_XyyGplYSpis/view
 
 This repository contains the physical hardware configuration, PDO mapping, demo scripts, and ROS 2 launch files required to bridge the RK3588's real-time EtherCAT master to the Jetson Thor's high-level AI policy.
 
-Currently, it serves as a test bench demonstrating single- or multi-servo control (specifically MyActuator RMD X-Series motors) using ROS 2 Jazzy and ethercat_driver_ros2 on a standard Linux laptop (which will be replaced by the RK3588 in the final implementation). Because this demo was developed on a machine without a PREEMPT_RT kernel patch, it is configured to run at 100Hz rather than the intended 1kHz.
+The bench and full-arm launches default to 100 Hz. Check timing and synchronization before raising the rate on the target machine.
 
 Today it runs the full robotic arm (arm01, 7 DOF) on real EtherCAT hardware.
 
 `wisco_ethercat_ros2_hw` is the hardware/control base of the arm01 stack. It implements:
 
 - **Full robotic arm bring-up** — `ros2_control` hardware interface + controller plugins (SafeCommandController and ArmController) running on [ICube ethercat_driver_ros2](https://github.com/ICube-Robotics/ethercat_driver_ros2), CiA402 over EtherCAT.
-- **ArmController** — the arm's 1 kHz Mode P / Mode T loop with a Pinocchio gravity model.
-- **Calibration CLI** — `scripts/arm` (backed by `arm_stack.cli`): bringup → zero → limits → kt → gravity → friction → latency, writing versioned `config/calib/arm01/<date>_v<N>.yaml` files.
+- **ArmController** — the arm's Mode P / Mode T control loop with a Pinocchio gravity model.
+- **Calibration CLI** — `scripts/arm` (backed by `arm_stack.cli`) supports single-command local autocalibration, passive commissioning, powered bringup checks, torque scaling, gravity fitting, friction and latency, writing versioned `config/calib/arm01/<date>_v<N>.yaml` files.
 - **Simulation** — Pinocchio + numpy arm model so `arm all --sim --quick` runs the whole calibration pipeline without hardware.
 - **Current sensing** — `current_sensor_node` polls ACS758 sensors through a TI ADS7128 I2C ADC and reports amperes per rail.
 - **Estop / safety** — `safety::safe_command` pure functions: command clamping, soft-limit scaling that falls to zero at the joint limits, hold/damp-on-stale-command, and outward-motion damping in effort mode.
@@ -40,7 +40,8 @@ ros2 launch wisco_ethercat_ros2_hw test_bench.launch.py use_mock_hardware:=true
 # Full arm, mock hardware
 ros2 launch wisco_ethercat_ros2_hw arm01.launch.py use_mock_hardware:=true
 
-# Full arm, real EtherCAT hardware (drives powered, master running)
+# Full arm, real EtherCAT hardware, motor enabling disabled
+# For first-time calibration use arm autocal as described below.
 ros2 launch wisco_ethercat_ros2_hw arm01.launch.py
 ```
 
@@ -53,7 +54,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 It is also recommended to configure `limits.conf` (rtprio and memlock for your user).
 
-The launch file starts the hardware, `joint_state_broadcaster` and one command controller. It does **not** move anything on its own: pass `demo:=true` to also start the demo script for the selected mode.
+The arm01 launch starts the hardware, `joint_state_broadcaster` and `arm_controller`. Motor enabling defaults to disabled. After commissioning, `enable_motion:=true` enables powered position holding. Bench demos use `demo:=true` with velocity or effort mode.
 
 rviz2 is recommended to visualize the servo state in real-time.
 
@@ -62,14 +63,269 @@ rviz2 is recommended to visualize the servo state in real-time.
 | `joints_file` | `config/joints.yaml` | Joint table (see below) |
 | `models_file` | `config/actuator_models.yaml` | Per-model numbers |
 | `calibration_file` | latest in `config/calib/arm01/` | Per-joint zero offsets |
+| `enable_motion` | `false` | Arm mode motor enabling. Set `true` after a passive reference or calibration to start powered holding. |
 | `control_mode` | from the joint table | `velocity` (CSV) or `effort` (CST) or `arm` (CSP/CST via ArmController) |
-| `update_rate` | `1000` (arm01) / `100` (test bench) | Controller manager rate **and** EtherCAT cycle, Hz |
-| `joint_state_rate` | `250` (arm01) / `100` (test bench) | `/joint_states` rate, Hz (capped at `update_rate`) |
+| `update_rate` | `100` (arm01 and test bench) | Controller manager rate **and** EtherCAT cycle, Hz |
+| `joint_state_rate` | `50` (arm01) / `100` (test bench) | `/joint_states` rate, Hz (capped at `update_rate`) |
 | `command_timeout` | `0.05` (arm01) / `0.1` (test bench) | Seconds without a command before the joints are stopped |
 | `use_mock_hardware` | `false` | Run the drives on `mock_components/GenericSystem` (velocity commands move the joints; effort commands are only echoed to the effort state) |
 | `demo` | `false` | Start `multi_velocity_cmd.py` (velocity) or `multiple_act_command.py` (effort) |
 
+### Profile-position test
+
+Stop any launch that owns IgH master 0. Run `ethercat slaves` and identify the target by its physical bus position. An isolated drive is at position 0. In the original seven-drive arm order J2 is at position 1 and J3 is at position 2.
+
+```bash
+source ~/Code/wisco_ws/install/setup.bash
+ethercat slaves
+ros2 run wisco_ethercat_ros2_hw pp_test --position 0
+ros2 run wisco_ethercat_ros2_hw pp_test --position 0 --move
+```
+
+The first command for the drive keeps controlword zero. It compares the live CoE descriptors to the PP configuration, brings the selected drive to OP, reads back SM2 (`0x1601 + 0x1602`) and SM3 (`0x1a00`), and verifies the profile values by SDO while cyclic PDOs run. The configuration matches the [MyActuator 260424 ESI](https://www.myactuator.com/downloads-ethercatesi).
+
+The second drive command repeats those checks, then tests a single **+5° output-encoder step** from the live position at a nominal 2°/s. Keep the load supported and allow clearance in the positive encoder direction. Type `MOVE` when prompted. The test verifies PP mode 1 and caps drive current at 10% of rated current or the existing lower limit. It stages the absolute target before raising controlword bit 4. A pass requires operation enabled, statusword bit 10 and encoder feedback within 0.15° of target for 100 ms. It also prints whether statusword bit 12 acknowledged the setpoint. At exit it requests drive disable and checks the original profile settings and any temporary current-limit change. Run each command in one terminal with the EtherCAT network attached to the IgH host.
+
+Use `ros2 run wisco_ethercat_ros2_hw pp_test --all --move` to test all connected drives in bus order with one confirmation. Each drive starts from its own live position. The powered sequence stops on a failure or interrupt. Mapping-only `--all` checks each position and summarizes any failures at the end.
+
 ---
+
+## First-time arm01 calibration
+
+### Choose the starting reference
+
+Run `ros2 run wisco_ethercat_ros2_hw arm status` to see the active reference.
+If it reports **relative**, run `ros2 run wisco_ethercat_ros2_hw arm autocal`
+with the arm supported and the launch stopped. Autocal starts cyclic feedback
+and powered holding in the same terminal. For a new arm with no reference, use
+the resting-pose procedure below, or use the registered CAD procedure if you
+have a fixture at the known model pose.
+
+To watch the joints move by hand, stop any arm launch, keep the drives disabled,
+and run the first command below. Ctrl-C releases the bus. The second command
+records labeled poses in a new CSV and takes the first pose as its baseline.
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm telemetry --cyclic
+ros2 run wisco_ethercat_ros2_hw arm telemetry --log-angles new_poses.csv
+```
+
+### Record a resting pose (no alignment fixture)
+
+For initial position holding, record the pose the arm is actually resting in.
+This needs no measured angles or particular elbow bend. Leave motor torque
+**disabled**, keep the drive electronics powered, and let the arm settle with
+clearance from the base, tool and cables. Leave `ros2 launch` stopped; if it is
+already running, stop it before taking the reference. Then run:
+
+```bash
+source ~/Code/wisco_ws/install/setup.bash
+ros2 run wisco_ethercat_ros2_hw arm reference
+```
+
+Confirm once with `yes`. The command reads cyclic encoder feedback, checks that all joints
+stay still, prints their counts and saves a versioned YAML under
+`config/calib/arm01/`. Every joint's resting position becomes **0 relative
+degrees**. Configured directions and encoder scales are retained. No motors are
+enabled and the arm is not moved.
+
+To enable position holding afterward:
+
+```bash
+ros2 launch wisco_ethercat_ros2_hw arm01.launch.py enable_motion:=true
+```
+
+The controller holds the actual position it reads at this startup. It does not
+return to the recorded zero, sweep the joints or move to `home_pose_rad`. With a
+relative reference, motion commands are rejected by the controller and CAD
+gravity compensation stays disabled. The drives' position loops provide holding
+torque. Support the arm before Ctrl-C disables motor control.
+
+This is an initial encoder reference, **not a completed motor calibration**.
+Hanging does not establish the CAD angles of all seven joints, particularly the
+twist joints. Physical stops, usable travel and gravity remain unmeasured.
+`/joint_states` contains relative angles, so CAD/RViz poses and tool coordinates
+are not physically registered. CAD-based stages remain blocked. `arm autocal`
+automatically selects the relative procedure below when this reference is saved;
+it does not assume the arm is at the configured CAD home pose.
+
+Save the reference once and reuse it; do not automatically re-zero each startup.
+Check encoder continuity after a power cycle before relying on saved coordinates.
+Re-running `arm reference` explicitly changes the active coordinates and clears
+coordinate-dependent calibration; earlier versions remain in the history.
+`arm status` reports whether the current coordinates are relative or URDF.
+
+### Calibrate from the saved resting reference
+
+Support the arm, stop the arm launch and keep the electronics powered. Then run:
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm autocal
+```
+
+For a relative reference, this starts a separate local calibration procedure.
+It captures the settled starting encoders with cyclic feedback and motor enabling disabled.
+If a configuration change invalidated a passive-only resting reference, a passing run
+saves the captured pose as the new relative zero.
+It prints the motion envelope and requires `yes` before enabling motors. Every
+joint must have clearance in both directions: it does not search for hard stops.
+The initial relative envelope defaults to +/-10 degrees about the current position.
+Use `--travel-deg` to select a smaller radius down to 0.5 degrees. Existing measured local bounds are never expanded on a repeat run.
+
+After position holding starts, remove external support/load, check that holding
+is steady, stand clear and press Enter. Motors hold the other joints while each
+joint sweeps from center to the negative endpoint, across to the positive endpoint,
+and back at up to 12 degrees/s. At the default radius, the endpoints are −7° and +7°. Twenty-four settled measurements approach
+poses from both directions. An empirical affine model fits holding torque as a
+function of all seven relative angles; separate poses validate the result.
+Failure to track, insufficient encoder motion, excessive approach-dependent
+friction, drive faults, saturation or a failed held-out fit aborts the procedure.
+A failure preserves the previous calibration. A supported arm or contact with a
+stop invalidates gravity measurements; stop instead of letting it push.
+
+A passing run saves the local torque model and the smaller measured range
+(typically +/-7 degrees at the default setting), not full mechanical travel or physical link masses.
+After restarting the launch, the controller permits bounded position commands
+and can apply this local feedforward on drives with torque-offset support.
+All seven arm01 drives now use the 26042402 PDO profile. Torque mode, CAD gravity, payload modeling and CAD calibration
+stages remain blocked. The local model never extrapolates beyond its saved range.
+This is local commissioning, not full-arm gravity-compensated hand guiding.
+
+The command stays in position holding after success or a recoverable failure.
+Support the arm before Ctrl-C. Check drive status after stopping the master.
+On the next relative autocal run, confirming the supported pose authorizes the
+command to disable any enabled drives and verify their status before capture.
+Standalone `arm reference` requires the drives to be disabled before it starts.
+
+### Automatic calibration from a registered CAD pose
+
+The following alternative requires a known physical pose corresponding to the
+model. Do not use an arbitrary hanging pose for this command.
+
+Start with the arm launch stopped. The automatic command manages its own launch.
+In one terminal run
+
+```bash
+source ~/Code/wisco_ws/install/setup.bash
+ros2 run wisco_ethercat_ros2_hw arm autocal
+```
+
+On the first run, place the whole arm once at the reference pose printed by the
+command, using a rest or fixture while the motors are disabled. The printed
+angles come from `home_pose_rad` in the joint table and refer to the URDF joint
+coordinates. Confirm that pose and clearance for the printed motion range by
+entering `yes`. A compatible existing calibration supplies the reference on
+subsequent runs.
+
+After powered holding starts, the command pauses again. Carefully unload and
+remove the reference support, confirm the motors hold the arm steadily, stand
+clear, and press Enter. The reference fixture must be clear of the motion and
+carry no arm weight during gravity measurement.
+
+The command reads all encoder positions, calculates the zero offsets, starts
+powered position holding, checks the joints in turn, and fits and validates a
+local gravity model. The motors hold the remaining joints during the checks.
+Individual joint movements and gravity samples proceed automatically. The
+command monitors real drive status, feedback freshness, tracking, torque
+saturation and the local motion envelope.
+
+The default motion envelope extends at most three degrees each side of the
+starting pose, intersected with the existing configured limits. Command targets
+stay inside an additional margin. `--travel-deg` selects a local envelope between
+0.5 and 10 degrees when that clearance is known. The saved software limits bound
+this local envelope. Mechanical stops, full travel, physical rotation direction,
+encoder scale and torque scale remain unmeasured by this procedure. Configured
+directions and scales, or existing torque calibration, are retained and their
+provenance is recorded in the calibration file. A single reference pose anchors
+zero offsets; absolute physical coordinates require that reference to be correct.
+
+Passing results are saved to `config/calib/arm01/<date>_v<N>.yaml`, including
+reference readings, motion bounds, measured holding torques and validation
+results. The static fit estimates effective mass/center-of-mass combinations;
+individual physical masses can remain ambiguous. A failed run preserves the
+previous calibration. Measurements are limited to the saved local envelope.
+
+After success the command stays running with the arm held in position. Support
+the arm before pressing Ctrl-C to stop motor control. On a failed check it also
+keeps the controller holding while displaying the failure, until Ctrl-C. If a
+drive fault prevents holding, secure the arm and use the physical E-stop as needed.
+
+To operate with the saved model on the next startup, use
+
+```bash
+ros2 launch wisco_ethercat_ros2_hw arm01.launch.py enable_motion:=true
+```
+
+Idle and command-timeout behavior holds position. The saved gravity model is
+available for commanded gravity compensation after this restart. Inspect the
+latest calibration with
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm status
+```
+
+To exercise the complete automatic sequence without hardware
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm autocal --sim --quick --fresh
+```
+
+### OpenArm mechanical-stop zeroing
+
+Enactic's [zero-position calibration](https://github.com/enactic/openarm_can/blob/26b266ae90c36ead9f84dcba2d747c4762a94c18/setup/openarm-can-zero-position-calibration)
+starts near a prescribed pose, holds the arm, and approaches selected mechanical
+stops in a sequence specific to the arm. Low velocity and measured torque indicate
+contact. The script repositions the arm, disables the drives and writes motor zeros.
+
+For arm01, exercise this approach offline with the EtherCAT arm simulator:
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm autocal --stop-zero --sim --quick --fresh
+```
+
+J1 starts at 0° and uses its configured range of −90° to +180°. The other
+axes use the CAD export's conditional contact angles. The simulator approaches
+one stop twice per joint and saves encoder offsets after all seven pass.
+The J1 endpoints are configured ranges. Physical stop angles and contact loads
+still need to be measured on the assembled arm.
+
+To check J1 on hardware, support the arm and stop the launch. The command
+disables enabled drives and verifies their status before measurement. It records the starting J1 encoder reading as 0° using cyclic feedback.
+Select lower (−90°) or upper (+180°), then manually seat that stop twice. It reports
+the measured angles and their difference from the configured endpoint.
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm autocal --verify-stop shoulder_pitch
+```
+
+Ordinary `arm autocal` continues to use the local motion envelope.
+
+### Additional measurements
+
+`arm commission --write-config` remains available for independently measuring
+physical joint directions, encoder scales and larger usable ranges. With the
+arm launch stopped, its prompts collect two known physical angles and selected
+endpoints per joint. `arm kt` uses known test masses to calibrate torque scale.
+`arm limits` performs a powered hard-stop search for an assessed mechanical
+setup. These are separate measurements when the local automatic envelope is
+insufficient for the intended task.
+
+With a powered arm launch running in terminal 1, `arm bringup --soak-s 10` in
+terminal 2 performs individually confirmed small jogs and a holding check.
+The automatic command already runs position checks without those per-joint
+confirmations. Standalone `arm gravity --fit-masses`, `arm friction`, and
+`arm latency` remain available for an established calibrated range. Stop and
+restart the launch after each saved calibration version to load the result.
+New source calibration files are discovered directly under a symlink install,
+so rebuilding between stages is unnecessary.
+
+## Offline model analysis
+
+`tools/ik_benchmark.py` benchmarks IK solvers against sampled model poses.
+`tools/workspace_map.py` estimates reachability and generates workspace plots.
+Their generated reports, JSON, arrays and plots go under ignored `build/analysis/`.
+Rerun them when the model or joint limits change. These outputs describe the
+configured model and do not establish physical joint clearances or calibration.
 
 ## System architecture
 
@@ -97,7 +353,7 @@ wisco_ws/src/
 │   ├── urdf/test_bench.urdf.xacro      # Physical robot description & slave IDs
 │   ├── urdf/arm01/arm01.urdf           # arm01 CAD export + ros2_control block
 │   ├── src/safe_command_controller.cpp # command controller (pluginlib)
-│   ├── src/arm_controller.cpp          # ArmController 1 kHz Mode P / Mode T loop
+│   ├── src/arm_controller.cpp          # ArmController Mode P / Mode T loop
 │   ├── src/current_sensor_node.cpp     # ADS7128 + ACS758 current readout
 │   ├── wisco_ethercat_ros2_hw/         # Python: config generation, ROS helpers
 │   └── scripts/                        # demos, bring-up check, URDF check, arm CLI
@@ -198,7 +454,7 @@ Only the selected mode's command interface is exported, so nothing can command t
 
 ---
 
-## Bring-up procedure
+## Velocity-mode bench checks
 
 1. `ros2 run wisco_ethercat_ros2_hw check_urdf.py` (offline). Reports left/right axis, limit, effort and velocity mismatches and URDF limits that disagree with the wired actuator model.
 2. `ethercat slaves`: every drive is in PREOP/OP and the count matches the table.
@@ -212,13 +468,16 @@ Only the selected mode's command interface is exported, so nothing can command t
 
 - PREEMPT_RT kernel; run `ros2_control_node` with RT priority (`limits.conf`: `rtprio` and `memlock` for your user).
 - Isolate a core for the control loop (`isolcpus=`/`nohz_full=`) and pin the EtherCAT NIC's IRQs to it (`/proc/irq/*/smp_affinity`).
-- Set `update_rate:=1000`: the launch file uses the same value for the EtherCAT `control_frequency`, so they cannot drift apart.
-- Leave `joint_state_rate` at 100–250 Hz; the controllers read state interfaces directly, and a 1 kHz JointState stream only loads DDS.
+- Start at `update_rate:=100` (the arm01 default). The launch uses the same value for EtherCAT `control_frequency`. Raise the rate only after checking sustained loop timing and bus stability on the target machine.
+- arm01 publishes joint states at 50 Hz by default. Controllers read state interfaces directly; publishing faster adds DDS work.
 - DC sync is on (`dc_assign_activate: 0x0300` in the model table). Check that value against the drive's ESI on the bench; `0` turns DC off.
 
 ---
 
 ## Arm stack (arm01, the 7-DOF test arm)
+
+For a new physical arm, follow [First-time arm01 calibration](#first-time-arm01-calibration)
+above. The default arm01 launch keeps motor enabling disabled.
 
 The calibration and control stack from the spec ("Arm Calibration and Control Stack Spec"), on top of this package's hardware layer.
 
@@ -238,12 +497,15 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 
 | Stage | Command | Writes |
 |---|---|---|
-| 1 Bring up | `arm bringup` | joint config `direction` (with `--write-config`) |
+| Passive resting reference | `arm reference` with the arm launch stopped | relative encoder zero; position holding only, gravity and travel uncalibrated |
+| Automatic local calibration | `arm autocal` with the arm launch stopped | reference offsets, tested local motion envelope, effective gravity model and validation |
+| Optional measured arm coordinates | `arm commission --write-config` with the arm launch stopped | direction and encoder scale in the joint table, zero offsets and usable limits in a calibration YAML |
+| Powered arm check | `arm bringup --soak-s 10` with the powered launch running | PASS/FAIL report for confirmed small jogs and holding |
 | 1 Indicator | `arm indicator` | nothing (report: 90° step vs protractor, torque sign, 0x6077 units, nulls) |
-| 2 Zero | `arm zero` | `zero_offsets_rad` |
-| 3 Limits | `arm limits` | `soft_limits_rad` |
+| Optional jig re-zero | `arm zero` with motor enabling disabled | `zero_offsets_rad` |
+| Optional powered stop search | `arm limits` | `soft_limits_rad` |
 | 4 Torque constant | `arm kt` | `kt_output_nm_per_a` |
-| 5 Gravity comp | `arm gravity` | `link_inertials` |
+| 5 Gravity comp | `arm gravity --fit-masses` | `link_inertials`, gravity-fit validation |
 | 6 Friction | `arm friction` | `friction` |
 | 7 Latency | `arm latency` | `latency_ms` |
 | 8 Kinematics | `arm pivot` | `validation.pivot_spread_mm` |
@@ -314,7 +576,7 @@ Layout:
 
 - `urdf/arm01/arm01.urdf`: the CAD team's `full_assembly_urdf` export (Onshape capture, audited inertials and harness), converted by `tools/cad/import_full_assembly.py` to this repo's joint/link names and base frame, with `flange` and `tool0` added (the ledger at the top of the URDF lists every frame convention and assumption; regenerate, don't hand-edit). `tools/cad/arm01_capture.json` is the export's capture pose and link placements, which `test/arm_stack/test_fk.py` checks the URDF against. `arm01.ros2_control.xacro` adds the ros2_control block.
 - `config/arms/arm01.yaml`: the arm's joint config (`control_mode: arm`). `config/calib/arm01/<date>_v<N>.yaml`: calibration versions, append-only, written by the stages.
-- `src/arm_controller.cpp`, `include/.../arm_law.hpp`: the 1 kHz RT loop as a ros2_control controller. Mode P = CSP target (0x607A) + gravity/friction torque offset (0x60B2); Mode T = CST host PD + feedforward (0x6071). Pinocchio gravity from `robot_description` plus the calibration file, soft limits, torque/velocity clamps, bumpless switching, and a 50 ms watchdog that drops to gravity comp + damping (with the payload, if one was sent). `~/command` and `~/state` layouts are in `arm_controller.hpp`.
+- `src/arm_controller.cpp`, `include/.../arm_law.hpp`: the real-time loop as a ros2_control controller. Mode P = CSP target (0x607A) + gravity/friction torque offset (0x60B2); Mode T = CST host PD + feedforward (0x6071). Pinocchio gravity from `robot_description` plus the calibration file, soft limits, torque/velocity clamps, bumpless switching, and a 50 ms watchdog. The arm01 launch configures position holding on startup and timeout; gravity feedforward is enabled after a validated gravity fit is loaded. `~/command` and `~/state` layouts are in `arm_controller.hpp`.
 - `arm_stack/`: Python. `calib/` (stages), `control/` (the same law in Python, trajectories), `hw/` (ArmClient API; `ros_client.py` for the arm), `sim/` (sim backend with injectable errors), `model/` (Pinocchio model + calibration), `pace/` (CMA-ES, replay backend, GP-BO), `log/` (MCAP recorder, exports), `cli.py`.
 
 Tests: `test/test_arm_law.cpp` (gtest) and `test/arm_stack/` (pytest, same law cases in Python, optimizers, ISO 9283, recorder; `test_nomocap.py` runs the plate fit and the cube repeatability in sim; `test_float.py`: float and gravity-check in sim, about 1 min). The sim's operator hooks are `SimArm.apply_external_force` / `apply_external_torque`; its Coulomb + stiction is a velocity-level impulse (sticks below the breakaway, no tanh chatter creeping light joints). The Phase 0 gate (every procedure recovers its injected errors in sim) is `ARM_PHASE0_GATE=1 python3 -m pytest test/arm_stack/test_phase0_gate.py`.
@@ -323,7 +585,7 @@ Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slav
 
 Assumptions that need the bench (also in the URDF ledger):
 
-- Zeros and signs are the CAD export's operating coordinates (mapped from its Onshape mates), not encoder readings: `arm zero` and the jig set the encoder zeros, `arm bringup` checks the signs against gravity (J3 is mounted inverted, so its `direction` may need to be −1). **q = 0 is the arm stretched out forward**, its worst gravity load, so every stage starts from `home_pose_rad` in `arm01.yaml` (J1 +90°, elbow +45°: upper arm hanging, peg tip 10 cm above the stand's base plate), which is also the default jig pose. Hanging fully straight (or at the export's CAD capture, J1 80.8, J4 19.7, J5 −95, J6 28°) the peg tip is level with the base plate.
+- Zeros and signs are the CAD export's operating coordinates (mapped from its Onshape mates), not encoder readings: `arm commission` measures the initial encoder coordinates and usable limits, `arm zero` supports subsequent jig-based re-zeroing, and hardware `arm bringup` checks small individually confirmed jogs (J3 is mounted inverted, so its `direction` may need to be −1). **q = 0 is the arm stretched out forward**, its worst gravity load, so the model-based calibration stages use `home_pose_rad` in `arm01.yaml` (J1 +90°, elbow +45°: upper arm hanging, peg tip 10 cm above the stand's base plate), which is also the default jig pose. Hanging fully straight (or at the export's CAD capture, J1 80.8, J4 19.7, J5 −95, J6 28°) the peg tip is level with the base plate.
 - Ranges are the export's operating ROM (J1 −90..+180, J2 0..190, J3 ±90, J4 0..130, J5 ±90, J6 ±35, J7 ±90°), not certified stops: J1's stops are unverified, J2's contact onset is at −0.1° and J6's at ±35.1°. `arm limits` finds the real stops.
 - The wrist is a near-parallelogram (output/crank 0.996..1.004): the J6 encoder drives `wrist_pitch` (the output pivot) 1:1, within 0.25° over ±35°; the crank and coupler are mimic joints. The export's `model.py` has the exact loop.
 - Link masses are the export's audited model (provisional actuator masses, solid PLA peg, 178 g harness estimate; moving mass 3.92 kg) until the weighed values land in `link_masses_kg`.
@@ -523,3 +785,31 @@ Open a second (sourced) terminal while the launch file is running to inspect the
 - `ros2 run wisco_ethercat_ros2_hw arm status` — latest calibration version and contents
 
 [ICube ethercat_driver_ros2]: https://github.com/ICube-Robotics/ethercat_driver_ros2
+
+Hardware calibration
+Skip autocal and arm all.
+1. Terminal 1 — support the arm and start passive commissioning. Stop the arm launch, disable the drives, and leave the drive electronics powered. Commissioning requires an idle EtherCAT master and exactly seven responding drives.
+```
+   cd ~/Code/wisco_ws
+   source install/setup.bash
+   ros2 run wisco_ethercat_ros2_hw arm commission --write-config
+   ```
+2. Measure each joint in the model’s angle convention. Identify model zero and the positive direction for the named joint. Support the other joints and move only the named one.
+   - Place the joint at angle A, let the whole arm settle, and enter the measured angle in degrees. Repeat at B. Choose two angles you can read accurately over a wide, comfortable span. 5° is the minimum.
+   - Return to A and let the arm settle before pressing Enter. The repeat reading must agree within 0.2°.
+   - Move to the lower usable endpoint, then the upper, following the prompts. Leave mechanical and cable clearance at both ends. The software takes another 3° off each end.
+   - Return the joint to a supported pose inside the printed software limits and press Enter. Repeat for all seven joints.
+   Wait for Saved measured calibration before continuing. A successful run preserves the v1 calibration file, writes a new active version, and updates the joint table’s measured directions and encoder scales. If commissioning exits before saving, rerun it from the first joint.
+3. Terminal 1 — start powered holding. Keep the arm supported and inside the commissioned limits during startup. Leave this launch running.
+   ros2 launch wisco_ethercat_ros2_hw arm01.launch.py enable_motion:=true
+4. Terminal 2 — verify the small jogs.
+   cd ~/Code/wisco_ws
+   source install/setup.bash
+   ros2 run wisco_ethercat_ros2_hw arm bringup
+   Before each jog, read the joint name and signed angle. Confirm yes only if that joint alone moves in the expected physical direction and returns. Each jog is at most 3°. After the seventh jog, wait for the 10-second hold check and PASS. Stop here if a jog or the hold check fails.
+5. Terminal 2 — check physical angles and model zero. Have the angle reference ready and clear the whole arm’s travel area before submitting the command. The arm starts moving toward home before the first measurement prompt.
+   ros2 run wisco_ethercat_ros2_hw arm indicator
+   For each joint, record both the commanded angle and the external reading at each prompt. The test commands a step of up to 90° and requires the measured step to agree within 0.5°. After the readings, expect a move to a gravity-test pose, a sweep that can move several joints together by up to 2° each way, and a return home. A failed angle check does not automatically stop subsequent motion.
+Completion criterion: Require indicator to report PASS and review the individual readings for a consistent offset from the commanded angles. For example, readings of 4° and 94° at commands of 0° and 90° pass the step check but show a 4° model-zero offset. Resolve any such offset before accepting the physical calibration. Torque calibration, gravity fitting, and final validation come later.
+
+       
