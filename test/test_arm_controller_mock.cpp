@@ -297,12 +297,104 @@ TEST_F(ArmMock, RelativePositionModeUsesOnlyLocalGravityAndEnforcesLimits)
   h.cycle(1000);
   EXPECT_LE(h.hw().commands(0).position, 1.5);
   EXPECT_LE(h.hw().commands(1).position, 0.5);
-  EXPECT_DOUBLE_EQ(h.hw().commands(0).torque_offset, 0.0);  // no extrapolation
+  // j1 is outside the local box: no extrapolation, each joint's offset saturates at
+  // the box edge (continuous, no step to 0)
+  auto saturated = [&h]() {
+      const double c0 = std::clamp(h.hw().states(0).position, -0.5, 0.5);
+      const double c1 = std::clamp(h.hw().states(1).position, -0.5, 0.5);
+      return std::vector<double>{0.5 + 0.1*c0 + 0.2*c1, 0.2 + 0.3*c0 + 0.4*c1};
+    };
+  EXPECT_GT(h.hw().states(0).position, 0.5);
+  EXPECT_NEAR(h.hw().commands(0).torque_offset, saturated()[0], 1e-9);
+  EXPECT_NEAR(h.hw().commands(1).torque_offset, saturated()[1], 1e-9);
   h.stop_stream();
   std::this_thread::sleep_for(std::chrono::milliseconds(60));
   h.cycle(10);
+  // the timeout hold keeps the same feedforward
   EXPECT_EQ(h.hw().commands(0).mode_of_operation, cia402::kModeCsp);
-  EXPECT_DOUBLE_EQ(h.hw().commands(0).torque_offset, 0.0);
+  EXPECT_NEAR(h.hw().commands(0).torque_offset, saturated()[0], 1e-9);
+  h.deactivate();
+}
+
+// Watchdog hold (hold_on_timeout, as hardware_config sets it) out of a Mode T
+// session, with drives that take 8 cycles to switch CST -> CSP: the drive must keep
+// producing the gravity torque through the switch and the CSP hold, so the arm
+// neither drops nor sags.
+TEST_F(ArmMock, TimeoutHoldKeepsGravityThroughDelayedSwitch)
+{
+  ControllerHarness h(arm_joints());
+  h.set_realtime(false);
+  h.hw().set_load_model(gravity);
+  for (size_t i = 0; i < h.hw().size(); ++i) {
+    h.hw().slave(i).params().mode_switch_delay_cycles = 8;
+  }
+  h.run_bus(50);
+  ASSERT_TRUE(all_enabled(h));
+  auto params = arm_params(true, true);
+  params.emplace_back("hold_on_startup", true);
+  params.emplace_back("hold_on_timeout", true);
+  ASSERT_TRUE(h.load(std::make_shared<ArmController>(), "arm_controller", params, "/command"));
+  const std::vector<double> q0 = {0.3, -0.2};
+  h.stream(command(kModeP, q0));
+  h.cycle(400);
+  h.stream(command(kModeT, q0));     // gravity comp only (no stiffness), in CST
+  h.cycle(200);
+  ASSERT_EQ(h.hw().slave(0).active_mode(), cia402::kModeCst);
+  const std::vector<double> q_t = {h.hw().joint_position(0), h.hw().joint_position(1)};
+  const double g0 = gravity_at(q_t)[0];
+  ASSERT_GT(std::fabs(g0), 5.0) << "j1 must carry real gravity for this test";
+  h.stop_stream();
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  double min_tau = 1e9;
+  for (int k = 0; k < 300; ++k) {
+    h.cycle();
+    min_tau = std::min(min_tau, std::fabs(h.hw().slave(0).applied_torque()));
+  }
+  EXPECT_EQ(h.hw().slave(0).active_mode(), cia402::kModeCsp);
+  EXPECT_GT(min_tau, 0.5 * std::fabs(g0)) << "j1 lost its gravity torque during the hold";
+  EXPECT_NEAR(h.hw().commands(0).torque_offset, gravity_at({h.hw().states(0).position,
+    h.hw().states(1).position})[0], 0.05 * std::fabs(g0));
+  EXPECT_NEAR(h.hw().joint_position(0), q_t[0], 0.01);
+  EXPECT_NEAR(h.hw().joint_position(1), q_t[1], 0.01);
+  h.deactivate();
+}
+
+// A drive faults during the watchdog hold and its joint drops (no brake). After the
+// fault reset it is held where it is, not driven back to the angle the hold began at.
+TEST_F(ArmMock, HoldFollowsAFaultedJointSoReEnableDoesNotSnapBack)
+{
+  ControllerHarness h(arm_joints());
+  h.set_realtime(false);
+  h.hw().set_load_model(gravity);
+  h.run_bus(50);
+  ASSERT_TRUE(all_enabled(h));
+  auto params = arm_params(true, true);
+  params.emplace_back("hold_on_startup", true);
+  params.emplace_back("hold_on_timeout", true);
+  ASSERT_TRUE(h.load(std::make_shared<ArmController>(), "arm_controller", params, "/command"));
+  h.cycle(300);
+  const double q_start = h.hw().joint_position(0);
+  h.hw().slave(0).inject_fault(cia402::kErrOverCurrent);
+  for (int k = 0; k < 150 && std::fabs(h.hw().joint_position(0) - q_start) < 0.15; ++k) {h.cycle();}
+  // the operator catches the dropped joint and holds it still for the reset
+  h.hw().slave(0).set_blocked(true);
+  h.cycle(20);
+  const double q_dropped = h.hw().joint_position(0);
+  ASSERT_GT(std::fabs(q_dropped - q_start), 0.1) << "j1 should have dropped while faulted";
+  h.hw().commands(0).reset_fault = 0.0;
+  h.cycle();
+  h.hw().commands(0).reset_fault = 1.0;
+  int k = 0;
+  for (; k < 30 && !all_enabled(h); ++k) {h.cycle();}
+  ASSERT_LT(k, 30);
+  h.hw().commands(0).reset_fault = 0.0;
+  h.cycle(20);
+  h.hw().slave(0).set_blocked(false);   // and lets go once the drive holds it
+  const double q_enabled = h.hw().joint_position(0);
+  h.cycle(400);
+  EXPECT_NEAR(h.hw().joint_position(0), q_enabled, 0.02) << "re-enable drove j1 back toward its old hold";
+  EXPECT_GT(std::fabs(h.hw().joint_position(0) - q_start), 0.08);
+  EXPECT_FALSE(h.hw().slave(0).following_error());
   h.deactivate();
 }
 
