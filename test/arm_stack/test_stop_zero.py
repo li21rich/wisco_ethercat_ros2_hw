@@ -62,6 +62,31 @@ def test_missing_torque_is_not_a_stop(monkeypatch):
     assert limits.find_stop(ctx, 0, 1, np.zeros(1), np.ones(1)) is None
 
 
+def test_stiff_stop_is_found_before_the_lag_bound(monkeypatch):
+    """A rigid stop: the joint halts at once and pushes against it. The command runs
+    ahead at 0.3 rad/s, so the lag passes the 3 deg abort bound in about 0.17 s; with a
+    slow torque rise the 40 ms confirm has not finished by then. That is still a stop
+    (the 2026-11-15 gate failure: J1 halted at -92.5 deg, lag 3.01 deg, -10.3 Nm)."""
+    from arm_stack.calib import limits
+    wall = 0.5
+    state = SimpleNamespace(q=np.array([0.4]), qd=np.zeros(1), tau=np.zeros(1), t=0.0)
+    client = SimpleNamespace(state=lambda: state, cmd_dt=0.01)
+    ctx = SimpleNamespace(client=client, quick=True,
+                          arm=SimpleNamespace(names=['axis'], joints=[SimpleNamespace(peak_torque_nm=60)]),
+                          model=SimpleNamespace(n=1, lower=np.array([-1.0]), upper=np.array([0.45]),
+                                                gravity=lambda q: np.zeros(1)))
+    monkeypatch.setattr(limits, 'move_to', lambda *args, **kwargs: state)
+    def against_the_wall(client, q_cmd, qd, **kwargs):
+        state.t += client.cmd_dt
+        state.q = np.minimum(q_cmd[0], wall)
+        lag = q_cmd[0][0] - state.q[0]
+        # torque builds slowly with the lag: under 2.4 Nm (4% of peak) until 2.6 deg
+        state.tau = np.array([max(0.0, lag - 2.6 * limits.DEG) * 400.0])
+        return state
+    monkeypatch.setattr(limits, 'stream', against_the_wall)
+    assert limits.find_stop(ctx, 0, 1, np.zeros(1), np.ones(1)) == pytest.approx(wall)
+
+
 def test_verify_disables_only_enabled_drives_and_checks_status(monkeypatch):
     from arm_stack.calib.commission import EncoderReader
     from arm_stack.config import load_arm

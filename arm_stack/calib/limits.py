@@ -58,19 +58,26 @@ def find_stop(ctx, j, direction, home, clamp, reference=None):
         qd[j] = direction * speed
         s = stream(client, [q_cmd.copy()], [qd], torque_clamp=clamp, ignore_soft_limits=True)
         lag = direction * (q_cmd[j] - s.q[j])
+        # stopped, behind the command, and pushing in the approach direction above gravity
+        pressing = (lag > STALL_ERROR and abs(s.qd[j]) < 0.02
+                    and direction * (s.tau[j] - model.gravity(s.q)[j]) >= contact_nm)
         if lag > 2 * STALL_ERROR:
-            print(f'{ctx.arm.names[j]}: search stopped at {s.q[j]/DEG:.2f} deg, '
-                  f'lag {lag/DEG:.2f} deg, speed {s.qd[j]:.3f} rad/s, torque {s.tau[j]:.2f} Nm')
+            # The command runs away from a joint that has stopped. A joint that stopped
+            # pressing into something is at its stop (the 40 ms confirm below cannot finish
+            # before the lag passes this bound on a stiff stop); anything else aborts.
+            if pressing:
+                stall_q = float(s.q[j])
+            else:
+                print(f'{ctx.arm.names[j]}: search stopped at {s.q[j]/DEG:.2f} deg, '
+                      f'lag {lag/DEG:.2f} deg, speed {s.qd[j]:.3f} rad/s, torque {s.tau[j]:.2f} Nm')
             break
-        if lag > STALL_ERROR and abs(s.qd[j]) < 0.02:
-            excess_torque = direction * (s.tau[j] - model.gravity(s.q)[j])
-            if excess_torque >= contact_nm:
-                if contact_since is None:
-                    contact_since = s.t
-                if s.t - contact_since >= 0.04:
-                    stall_q = float(s.q[j])
-                    break
-                continue
+        if pressing:
+            if contact_since is None:
+                contact_since = s.t
+            if s.t - contact_since >= 0.04:
+                stall_q = float(s.q[j])
+                break
+            continue
         contact_since = None
     # back off
     move_to(client, near, max_speed=0.3, torque_clamp=clamp)
@@ -111,6 +118,9 @@ def run(ctx: StageContext) -> StageResult:
             if stop is None:
                 flags.append('%s: no confirmed stop on bounded search (maximum %.0f deg past the %s limit)'
                              % (name, SEARCH_BEYOND / DEG, 'upper' if direction > 0 else 'lower'))
+                # find_stop leaves the joint 8 deg inside a limit, maybe in a high-gravity
+                # pose: go home before giving up. Nothing is written for an unconfirmed stop.
+                move_to(client, home, max_speed=0.3, torque_clamp=clamp)
                 return StageResult('limits', False, {'hard_stops_rad': stops}, {}, lines, flags)
             found.append(stop)
         lo, hi = found
