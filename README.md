@@ -73,6 +73,8 @@ rviz2 is recommended to visualize the servo state in real-time.
 
 ### Profile-position test
 
+`pp_test` (and `test_pp_pdos`) link the IgH master and ethercat_driver_ros2 directly, so they are built only where CMake finds both; elsewhere (a dev laptop, CI) the build skips them with a warning and everything else still builds.
+
 Stop any launch that owns IgH master 0. Run `ethercat slaves` and identify the target by its physical bus position. An isolated drive is at position 0. In the original seven-drive arm order J2 is at position 1 and J3 is at position 2.
 
 ```bash
@@ -242,7 +244,11 @@ zero offsets; absolute physical coordinates require that reference to be correct
 Passing results are saved to `config/calib/arm01/<date>_v<N>.yaml`, including
 reference readings, motion bounds, measured holding torques and validation
 results. The static fit estimates effective mass/center-of-mass combinations;
-individual physical masses can remain ambiguous. A failed run preserves the
+individual physical masses can remain ambiguous. Its validation poses come from
+the same few-degree envelope, so the file records it as `local_passed` with the
+fit poses' span, and `passed` (which enables full-arm gravity feedforward on the
+next launch) only when the fit poses span at least 30° on every gravity-loaded
+joint. Run `arm gravity --fit-masses` over the full range for that. A failed run preserves the
 previous calibration. Measurements are limited to the saved local envelope.
 
 After success the command stays running with the arm held in position. Support
@@ -618,8 +624,11 @@ The node is a standalone ROS 2 node built from `src/current_sensor_node.cpp`. Pa
 | `i2c_address` | `0x10` | ADS7128 7-bit address |
 | `poll_period_ms` | `100` | ms between sweeps of all channels |
 | `print_raw_counts` | `false` | also print the raw ADC code per channel |
+| `sensor_supply_v` | `3.3` | ACS758 VCC: its sensitivity is ratiometric to it |
+| `sensitivity_mv_per_a_at_5v` | `13.2` | datasheet sensitivity, quoted at VCC = 5 V |
 
-Zero-current offsets are hardcoded at 2048 counts (VCC/2). Run with `print_raw_counts:=true` with the rails unloaded to read each channel's true zero, then update `kSensors` in `current_sensor_node.cpp`.
+The ACS758's output scales with its supply: 13.2 mV/A at 5 V is 8.71 mV/A on the
+3.3 V sensor rail, and using the 5 V figure there reads 34% low. Zero-current offsets are hardcoded at 2048 counts (VCC/2). Run with `print_raw_counts:=true` with the rails unloaded to read each channel's true zero, then update `kSensors` in `current_sensor_node.cpp`.
 
 ---
 
