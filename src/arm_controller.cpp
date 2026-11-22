@@ -392,14 +392,19 @@ controller_interface::return_type ArmController::update(
     }
   }
   if (local_gravity_enabled_) {
-    bool inside = true;
+    // The local fit is only trusted inside its box, so it is never extrapolated:
+    // outside, each joint's offset from the centre saturates at the box edge. That
+    // keeps g continuous (a step to 0 at the edge would drop the shoulder) and
+    // bounded by its value on the box. A non-finite reading turns it off.
+    bool finite_q = true;
+    for (size_t i = 0; i < n; ++i) {finite_q = finite_q && std::isfinite(q_[i]);}
     for (size_t i = 0; i < n; ++i) {
-      inside = inside && std::isfinite(q_[i]) && q_[i] >= local_lower_[i] && q_[i] <= local_upper_[i];
-    }
-    for (size_t i = 0; i < n; ++i) {
-      g_[i] = inside ? local_bias_[i] : 0.0;
-      if (inside) {
-        for (size_t j = 0; j < n; ++j) {g_[i] += local_jacobian_[i*n+j]*(q_[j]-local_center_[j]);}
+      g_[i] = finite_q ? local_bias_[i] : 0.0;
+      if (finite_q) {
+        for (size_t j = 0; j < n; ++j) {
+          const double qj = std::clamp(q_[j], local_lower_[j], local_upper_[j]);
+          g_[i] += local_jacobian_[i*n+j]*(qj-local_center_[j]);
+        }
       }
     }
   } else if (gravity_enabled_) {gravity_->gravity(q_, g_);} else {std::fill(g_.begin(), g_.end(), 0.0);}
@@ -407,9 +412,21 @@ controller_interface::return_type ArmController::update(
   const bool hold = out_.fallback && (hold_on_timeout_ || (hold_on_startup_ && !cmd));
   if (hold) {
     if (!holding_ || ((hold_only_ || position_only_) && !all_enabled)) {q_hold_ = q_;}
+    // A drive that is not enabled is not held where the hold began: it may have
+    // dropped. Follow it, so re-enabling holds it where it is instead of driving
+    // it back to a stale angle.
+    for (size_t i = 0; i < n; ++i) {
+      if (!enabled_[i]) {q_hold_[i] = q_[i];}
+    }
     out_.mode = arm::kModeP;
     out_.q_target = q_hold_;
-    std::fill(out_.tau.begin(), out_.tau.end(), 0.0);
+    // Keep the gravity feedforward (0 when gravity is off, e.g. hold_only). With
+    // tau = 0 a drive still in CST during the CST -> CSP switch would get no torque
+    // at all (0x6071 = 0x60B2 = 0) and the arm would drop, and once in CSP the
+    // position loop would hold it with no gravity support.
+    for (size_t i = 0; i < n; ++i) {
+      out_.tau[i] = std::clamp(g_[i], -cfg_.max_torque[i], cfg_.max_torque[i]);
+    }
   }
   holding_ = hold;
 

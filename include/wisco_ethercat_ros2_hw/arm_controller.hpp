@@ -7,7 +7,11 @@
 //                     friction_ff_gain, q[n], qd[n], kp[n], kd[n], tau_ff[n],
 //                     torque_clamp[n]]
 //                    NaN = not set. A command older than watchdog_s (50 ms)
-//                    drops the arm into gravity comp + damping in CST.
+//                    drops the arm into gravity comp + damping in CST, or, with
+//                    hold_on_timeout (hold_on_startup before the first command),
+//                    holds the pose in CSP with the gravity feedforward in 0x60B2.
+//                    A joint whose drive is not enabled during the hold has its
+//                    hold angle follow it, so re-enabling holds it where it is.
 //                    Optionally followed by a payload block [kg, x, y, z]: a
 //                    point mass fixed in payload_frame (parameter, default
 //                    tool0), added to g(q) from then on (Mode P, Mode T and the
