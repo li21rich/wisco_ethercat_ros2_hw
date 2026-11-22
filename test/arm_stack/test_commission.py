@@ -148,12 +148,14 @@ def test_capture_all_refuses_a_joint_settling_during_capture(monkeypatch):
         Reader().capture_all(load_arm())
 
 
-@pytest.mark.parametrize('problem', [None, 'enabled', 'moving', 'invalid'])
+@pytest.mark.parametrize('problem', [None, 'enabled', 'moving', 'invalid', 'dead'])
 def test_passive_cyclic_capture_requires_settled_disabled_feedback(monkeypatch, problem):
     from types import SimpleNamespace
     from arm_stack.calib.commission import CyclicPositions
     arm = load_arm()
-    start = np.arange(arm.n, dtype=float) * 1000
+    start = (np.arange(arm.n, dtype=float) + 1) * 1000
+    if problem == 'dead':
+        start[1] = start[2] = 0.0        # the 2026-11-15 capture: J2 / J3 not reporting
     calls = []
     def state():
         counts = start.copy()
@@ -171,7 +173,8 @@ def test_passive_cyclic_capture_requires_settled_disabled_feedback(monkeypatch, 
     positions = CyclicPositions(SimpleNamespace(state=state))
     if problem:
         with pytest.raises(RuntimeError, match={'moving': 'shoulder_roll moved', 'invalid': 'Invalid',
-                                               'enabled': 'drive is enabled'}[problem]):
+                                               'enabled': 'drive is enabled',
+                                               'dead': 'shoulder_roll, shoulder_yaw: 0x6064 reads exactly 0'}[problem]):
             positions.capture_all(arm)
     else:
         assert positions.capture_all(arm) == pytest.approx(start)
@@ -182,6 +185,26 @@ def test_passive_cyclic_capture_requires_settled_disabled_feedback(monkeypatch, 
 def test_encoder_fit_refuses_insufficient_movement(counts, angles):
     with pytest.raises(ValueError):
         fit_encoder(counts[0], math.radians(angles[0]), counts[1], math.radians(angles[1]))
+
+
+def test_encoder_fit_snaps_to_a_plausible_scale_or_refuses():
+    cpr, gear = 131072, 19.612
+    a, b = math.radians(0), math.radians(30)
+    counts = lambda scale: (0.0, scale * (b - a) / (2 * math.pi))
+    # 0.5 deg of reading error over 30 deg: 1.7% off, snapped to the configured scale
+    c0, c1 = counts(cpr * 30.5 / 30)
+    assert fit_encoder(c0, a, c1, b, cpr, gear)[1] == cpr
+    # a motor-side encoder (gear ratio times the counts) is recognised as such
+    c0, c1 = counts(cpr * gear)
+    assert fit_encoder(c0, a, c1, b, cpr, gear)[1] == round(cpr * gear)
+    # 10% off every plausible scale: refused rather than written to the joint config
+    c0, c1 = counts(cpr * 1.1)
+    with pytest.raises(ValueError, match='plausible scale'):
+        fit_encoder(c0, a, c1, b, cpr, gear)
+    # over a short span the same 0.5 deg reading error is 10%: refused, not written
+    c0, c1 = counts(cpr * 5.5 / 5)
+    with pytest.raises(ValueError, match='plausible scale'):
+        fit_encoder(c0, a, c1 * 5 / 30, math.radians(5), cpr, gear)
 
 
 def test_extended_state_carries_real_status():
@@ -296,7 +319,10 @@ def test_autocal_sim_command_runs_without_per_joint_prompts(tmp_path, monkeypatc
     calibration = CalibrationStore(load_arm(), str(tmp_path)).latest()
     assert calibration['stage'] == 'autocal'
     assert calibration['commissioning']['verified']
-    assert calibration['gravity_validation']['passed']
+    # validated inside the few-degree envelope only: full-arm feedforward stays off
+    assert calibration['gravity_validation']['local_passed']
+    assert calibration['gravity_validation']['passed'] is False
+    assert max(calibration['gravity_validation']['fit_span_deg']) < 30
     assert len(calibration['commissioning']['gravity_metrics']['holding_torques_nm']) > 0
 
 

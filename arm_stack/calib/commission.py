@@ -14,6 +14,20 @@ import numpy as np
 from ..config import CalibrationStore, load_arm
 
 
+def require_live_counts(names, samples):
+    """Refuse a joint whose 0x6064 reads exactly 0 in every sample. A settled 18-bit
+    absolute encoder essentially never does; 0 means the drive is not reporting its
+    position (an unmapped or legacy PDO profile, the controller's q not received) or
+    reset it at power on, and a reference or fit from it would be wrong on every
+    restart. samples: (k, n) or (n,)."""
+    samples = np.atleast_2d(np.asarray(samples, float))
+    dead = [names[i] for i in range(samples.shape[1]) if np.all(samples[:, i] == 0.0)]
+    if dead:
+        raise RuntimeError('%s: 0x6064 reads exactly 0 counts. The drive is not reporting its position '
+                           '(PDO profile, encoder) or reset it at power on; fix that before capturing.'
+                           % ', '.join(dead))
+
+
 class EncoderReader:
     method = 'passive_sdo'
 
@@ -74,6 +88,7 @@ class EncoderReader:
         self.require_idle(arm)
         if np.ptp(values) > joint.counts_per_rev * 0.2 / 360:
             raise RuntimeError('%s moved during measurement; hold it stationary and retry.' % joint.name)
+        require_live_counts([joint.name], np.asarray(values, float)[:, None])
         return float(np.mean(values))
 
     def capture_all(self, arm):
@@ -88,6 +103,7 @@ class EncoderReader:
         for i, joint in enumerate(arm.joints):
             if np.ptp(samples[:, i]) > joint.counts_per_rev * 0.2 / 360:
                 raise RuntimeError('%s moved during measurement; let the whole arm settle and retry.' % joint.name)
+        require_live_counts(arm.names, samples)
         return np.mean(samples, axis=0)
 
 
@@ -114,6 +130,7 @@ class CyclicPositions:
         if moving.size:
             names = ', '.join(arm.names[i] for i in moving)
             raise RuntimeError(f'{names} moved during capture. Let the supported arm settle.')
+        require_live_counts(arm.names, samples)
         return np.mean(samples, axis=0)
 
     def capture(self, arm, joint):
@@ -131,13 +148,40 @@ def angle(prompt):
         print('Enter a finite angle in degrees relative to the robot model zero pose.')
 
 
-def fit_encoder(count_a, angle_a, count_b, angle_b):
-    if abs(angle_b - angle_a) < math.radians(5):
-        raise ValueError('The two reference angles must differ by at least 5 degrees.')
+MIN_SPAN = math.radians(5)
+SCALE_TOLERANCE = 0.04
+
+
+def fit_encoder(count_a, angle_a, count_b, angle_b, configured_cpr=None, gear_ratio=None):
+    """Direction, counts per output revolution and zero from two measured angles.
+
+    Two hand-read angles cannot set the encoder scale to better than a few percent
+    (0.25 deg of reading error over a 10 deg span is 2.5%), and a scale that is a few
+    percent off skews every position and velocity. So the measured scale only picks
+    between the plausible encoder scales, the configured counts_per_rev or that
+    times / over the gear ratio (an output- vs motor-side encoder), and must be
+    within 4% of one of them; anything else is refused as a mapping or reading
+    error. Without configured_cpr (no candidates) the measured value is returned.
+    """
+    if abs(angle_b - angle_a) < MIN_SPAN:
+        raise ValueError('The two reference angles must differ by at least %.0f degrees.'
+                         % math.degrees(MIN_SPAN))
     slope = (count_b - count_a) / (angle_b - angle_a)
     if not math.isfinite(slope) or abs(count_b - count_a) < 10:
         raise ValueError('Insufficient encoder movement. Check the bus position and joint mapping.')
-    counts_per_rev = round(abs(slope) * 2 * math.pi)
+    measured = abs(slope) * 2 * math.pi
+    counts_per_rev = round(measured)
+    if configured_cpr:
+        candidates = [float(configured_cpr)]
+        if gear_ratio and gear_ratio > 1:
+            candidates += [configured_cpr * gear_ratio, configured_cpr / gear_ratio]
+        best = min(candidates, key=lambda c: abs(measured / c - 1))
+        if abs(measured / best - 1) > SCALE_TOLERANCE:
+            raise ValueError('Measured %.0f counts per output revolution, more than %.0f%% from every '
+                             'plausible scale (%s). Recheck the two angles and the joint mapping.'
+                             % (measured, SCALE_TOLERANCE * 100,
+                                ', '.join('%.0f' % c for c in candidates)))
+        counts_per_rev = int(round(best))
     direction = 1 if slope > 0 else -1
     zero = direction * count_a * 2 * math.pi / counts_per_rev - angle_a
     return direction, counts_per_rev, zero
@@ -177,9 +221,12 @@ def run(args, reader=None):
             print('\n%s, EtherCAT bus position %d' % (joint.name, joint.bus_position))
             a = angle('Place at reference angle A, then enter its measured degrees: ')
             count_a = positions.capture(arm, joint)
-            b = angle('Place at reference angle B (at least 5 deg away), enter measured degrees: ')
+            b = angle('Place at reference angle B (at least 5 deg away; 30+ reads the scale far better), '
+                      'enter measured degrees: ')
             count_b = positions.capture(arm, joint)
-            direction, cpr, zero = fit_encoder(count_a, a, count_b, b)
+            row = next(r for r in arm.raw['joints'] if r['name'] == joint.name)
+            direction, cpr, zero = fit_encoder(count_a, a, count_b, b, joint.counts_per_rev,
+                                               float(row.get('gear_ratio') or 0) or None)
             input('Return to reference angle A and press Enter to verify repeatability: ')
             repeat = positions.capture(arm, joint)
             if abs(repeat - count_a) * 360 / cpr > 0.2:

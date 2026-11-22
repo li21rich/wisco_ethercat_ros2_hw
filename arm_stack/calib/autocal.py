@@ -150,6 +150,30 @@ class MotionMonitor:
         return self.state()
 
 
+# A gravity model fitted from poses that span less than this on any gravity-loaded
+# joint is validated only inside that envelope: its held-out poses come from the same
+# few degrees, and outside it the fitted masses (0.05x to 5x the URDF) can be far off.
+# hardware_config enables full-arm feedforward only for `gravity_validation.passed`.
+FULL_ARM_SPAN = 30 * DEG
+GRAVITY_LOADED_NM = 0.5
+
+
+def full_arm_validation(arm, result):
+    """gravity_validation for autocal: passed only when the fit covers the full arm."""
+    from ..cli import build_model
+    validation = dict(result.writes.get('gravity_validation') or {})
+    fit = np.asarray(result.metrics.get('fit_poses') or [], float)
+    span = np.ptp(fit, axis=0) if fit.size else np.zeros(arm.n)
+    loaded = build_model(arm, {}).peak_gravity_torque() > GRAVITY_LOADED_NM
+    full = bool(validation.get('passed')) and bool(np.all(span[loaded] >= FULL_ARM_SPAN))
+    validation.update(passed=full, local_passed=bool(validation.get('passed')),
+                      fit_span_deg=(span / DEG).tolist())
+    if not full:
+        validation['reason'] = ('local envelope only: fit poses span under %.0f deg on a gravity-loaded joint'
+                                % (FULL_ARM_SPAN / DEG))
+    return validation
+
+
 def calibrate(arm, seed, center, client, quick=False):
     from ..cli import build_model
     model = build_model(arm, seed)
@@ -255,6 +279,7 @@ def run(args):
             # Stop sampling before committing the tested model. Runtime keeps the
             # initial position-hold configuration until the next normal launch.
             updates = dict(result.writes)
+            updates['gravity_validation'] = full_arm_validation(arm, result)
             metadata = dict(seed['commissioning'], verified=True,
                             local_checks_passed=True, gravity_metrics=result.metrics)
             updates.update(zero_offsets_rad=seed['zero_offsets_rad'],
@@ -266,6 +291,11 @@ def run(args):
                 raise RuntimeError('Calibration store changed during autocal; results were not saved.')
             path = store.write('autocal', updates)
             print('Autocal PASS. Saved %s' % path, flush=True)
+            if not updates['gravity_validation']['passed']:
+                print('The gravity fit passed inside the local envelope only (fit poses span %.1f deg at the '
+                      'least, under %.0f deg): full-arm gravity feedforward stays off. Run '
+                      '`arm gravity --fit-masses` over the full range to enable it.'
+                      % (min(updates['gravity_validation']['fit_span_deg']), FULL_ARM_SPAN / DEG), flush=True)
             print('The saved limits cover the tested local envelope; mechanical stops remain unmeasured.', flush=True)
             if launch is not None:
                 print('Arm is holding position. Support it before Ctrl-C stops motor control. '
