@@ -30,9 +30,8 @@ defaults:
 models:
   x4_10:                              # RMD-X4-P12-10-E
     gear_ratio: 12.5                  # manual table; user manual says 12.6, label photo 1:13 (verify)
-    counts_per_rev: 131072            # 0x6064 per output rev. Dual absolute encoder: 17-bit motor,
-                                      # 18-bit output; the CiA402 manual uses 131072 increments/rev.
-                                      # verify with `arm indicator` (a 262144 would read half the angle)
+    counts_per_rev: 262144            # 0x6064 per output rev, 18-bit output encoder. Measured 2026-11-23:
+                                      # at 131072 arm01 J6 stop-to-stop read 141 deg for its 70 deg range
     encoder_side: output
     rated_current_a: 7.8              # phase, rms; 0x6075 default is the drive's internal value (read it)
     peak_current_a: 19.5
@@ -54,7 +53,8 @@ models:
 
   x4_36:                              # RMD-X4-P36-36-E
     gear_ratio: 36
-    counts_per_rev: 131072            # as x4_10: 18-bit output encoder, verify with `arm indicator`
+    counts_per_rev: 262144            # 18-bit output encoder. Measured 2026-11-23 on arm01 J5: 90 deg
+                                      # commanded at 131072 turned ~47 deg (stop-to-stop travel read ~2x)
     encoder_side: output
     rated_current_a: 6.1
     peak_current_a: 21.5

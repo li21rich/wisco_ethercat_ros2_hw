@@ -414,6 +414,8 @@ def run_hardware(args, reader=None, launch_factory=None):
         calibration_file = Path(directory) / 'pending.yaml'
         import yaml
         calibration_file.write_text(yaml.safe_dump(seed, sort_keys=False))
+        # compare against exactly what the controller loads (tuples/numpy floats differ after YAML)
+        seed = yaml.safe_load(calibration_file.read_text())
         launch, client = None, None
         try:
             print('Starting the position controller.', flush=True)

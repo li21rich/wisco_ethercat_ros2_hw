@@ -1,0 +1,163 @@
+# Written by `arm stop_zero`. Never edit by hand; rerun the stage.
+version: 2
+arm_serial: arm01
+date: '2026-11-23'
+git_sha: 7539abb
+joint_config_hash: 569402adda9854f4
+stage: stop_zero
+zero_offsets_rad:
+  shoulder_pitch: -0.22630578683458658
+  shoulder_roll: 0.1384617398148547
+  shoulder_yaw: 0.5802282330177437
+  elbow: 1.0014737384410273
+  forearm_yaw: -0.8706539393741549
+  wrist_pitch: 0.037966024500169615
+  wrist_yaw: -0.8837167445209936
+soft_limits_rad:
+  shoulder_pitch:
+  - -1.5707963267948966
+  - 3.141592653589793
+  shoulder_roll:
+  - 0.0
+  - 0.01209527872281288
+  shoulder_yaw:
+  - -1.5707963267948966
+  - 1.4419291574392703
+  elbow:
+  - 0.0
+  - 0.37534512508744083
+  forearm_yaw:
+  - 0.04850095714030504
+  - 1.5707963267948966
+  wrist_pitch:
+  - -0.6108652381980153
+  - 0.6108652381980153
+  wrist_yaw:
+  - -1.5707963267948966
+  - 1.5707963267948966
+kt_output_nm_per_a:
+  shoulder_pitch: null
+  shoulder_roll: null
+  shoulder_yaw: null
+  elbow: null
+  forearm_yaw: null
+  wrist_pitch: null
+  wrist_yaw: null
+link_inertials: null
+friction: null
+latency_ms: null
+joint_stiffness_nm_per_rad: null
+kinematic_overlay: null
+pace: null
+validation: null
+coordinate_frame: urdf
+local_gravity: null
+gravity_validation: null
+commissioning:
+  method: powered_stop_zero
+  verified: false
+  encoder_reference: mechanical_stops
+  rough_reference:
+    pose_rad:
+    - 1.5708
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    counts:
+    - 28047.166666666668
+    - 2888.4166666666665
+    - 24208.0
+    - 41783.0
+    - -36325.0
+    - 792.0
+    - -18435.0
+    tolerance_deg: 10.0
+    joints_left_on_it:
+    - shoulder_pitch
+  references:
+    shoulder_roll:
+      lower:
+        stop_rad: -3.353997061070698
+        rough_angles_rad:
+        - -3.3540210295205086
+        - -3.3539730926208873
+      upper:
+        stop_rad: 0.06445515628264277
+        rough_angles_rad:
+        - 0.06431134558377849
+        - 0.06459896698150705
+      travel_rad: 3.418452217353341
+      center_rad: -1.6447709523940275
+    shoulder_yaw:
+      lower:
+        stop_rad: -1.8639064995301076
+        rough_angles_rad:
+        - -1.8640023733293505
+        - -1.8638106257308646
+      upper:
+        stop_rad: 1.4942890349991003
+        rough_angles_rad:
+        - 1.4942890349991003
+        - 1.4942890349991003
+      travel_rad: 3.358195534529208
+      center_rad: -0.18480873226550365
+    elbow:
+      lower:
+        stop_rad: -2.1277511950464376
+        rough_angles_rad:
+        - -2.1276313527973842
+        - -2.1278710372954914
+      upper:
+        stop_rad: 0.42770500264727074
+        rough_angles_rad:
+        - 0.4277888922216082
+        - 0.42762111307293327
+      travel_rad: 2.5554561976937085
+      center_rad: -0.8500230961995834
+    forearm_yaw:
+      lower:
+        stop_rad: -0.003858920419524847
+        rough_angles_rad:
+        - -0.0040506680180105725
+        - -0.003667172821039122
+      upper:
+        stop_rad: 3.356158216295297
+        rough_angles_rad:
+        - 3.356158216295297
+        - 3.356158216295297
+      travel_rad: 3.3600171367148217
+      center_rad: 1.6761496479378861
+    wrist_pitch:
+      lower:
+        stop_rad: -1.1765632643082868
+        rough_angles_rad:
+        - -1.1765632643082868
+        - -1.1765632643082868
+      upper:
+        stop_rad: 1.2837981087614174
+        rough_angles_rad:
+        - 1.2843733515568745
+        - 1.2832228659659604
+      travel_rad: 2.4603613730697043
+      center_rad: 0.05361742222656529
+    wrist_yaw:
+      lower:
+        stop_rad: -3.2036949070493512
+        rough_angles_rad:
+        - -3.2043420551942403
+        - -3.203047758904462
+      upper:
+        stop_rad: 3.8298706583542317
+        rough_angles_rad:
+        - 3.8284804882652104
+        - 3.831260828443253
+      travel_rad: 7.033565565403583
+      center_rad: 0.31308787565244023
+  direction_and_scale: configured
+  mechanical_stops_measured: true
+  range_kind: both_stops_per_joint
+  relative_motion: false
+  local_checks_passed: false

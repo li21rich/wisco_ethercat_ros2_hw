@@ -76,7 +76,7 @@ def test_factors_fold_in_direction_and_zero(tmp_path, direction):
     counts = 50000
     pos = channel(cfg, 'tpdo', 0x6064)
     angle = pos['factor'] * counts + pos['offset']
-    assert angle == pytest.approx(direction * counts * 2 * math.pi / 131072 - zero)
+    assert angle == pytest.approx(direction * counts * 2 * math.pi / 262144 - zero)   # x4_10: 18-bit output encoder
 
     # 0x607A: the driver writes back the joint position it just read, so the
     # command factor must invert the state factor and land on the same counts.
