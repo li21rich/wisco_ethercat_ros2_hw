@@ -8,11 +8,17 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-find_package(ethercat_generic_slave REQUIRED)
-find_package(ethercat_interface REQUIRED)
+# pp_test (and its PDO test) link the EtherCAT driver and the IgH master directly.
+# They are optional so the controllers, the mock-ring tests and arm_stack still
+# build on a machine without the drive stack (dev laptop, CI).
+find_package(ethercat_generic_slave QUIET)
+find_package(ethercat_interface QUIET)
 find_library(IGH_LIBRARY NAMES ethercat PATHS /usr/local/etherlab/lib)
-if(NOT IGH_LIBRARY)
-  message(FATAL_ERROR "pp_test requires the IgH EtherCAT library")
+if(ethercat_generic_slave_FOUND AND ethercat_interface_FOUND AND IGH_LIBRARY)
+  set(WISCO_BUILD_PP_TEST ON)
+else()
+  set(WISCO_BUILD_PP_TEST OFF)
+  message(WARNING "IgH EtherCAT library or ethercat_driver_ros2 not found: skipping pp_test and test_pp_pdos")
 endif()
 
 find_package(controller_interface REQUIRED)
@@ -54,11 +60,19 @@ install(TARGETS wisco_ethercat_ros2_hw_controllers wisco_ethercat_ros2_hw_arm_co
   RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 
-add_executable(pp_test src/pp_test.cpp)
-target_compile_features(pp_test PRIVATE cxx_std_17)
-ament_target_dependencies(pp_test ament_index_cpp ethercat_interface rclcpp)
-target_link_libraries(pp_test ethercat_generic_slave::ethercat_generic_slave ${IGH_LIBRARY} yaml-cpp)
-install(TARGETS pp_test DESTINATION lib/${PROJECT_NAME})
+if(WISCO_BUILD_PP_TEST)
+  add_executable(pp_test src/pp_test.cpp)
+  target_compile_features(pp_test PRIVATE cxx_std_17)
+  ament_target_dependencies(pp_test ament_index_cpp ethercat_interface rclcpp)
+  target_link_libraries(pp_test ethercat_generic_slave::ethercat_generic_slave ${IGH_LIBRARY} yaml-cpp)
+  install(TARGETS pp_test DESTINATION lib/${PROJECT_NAME})
+endif()
+
+# --- current_sensor_node: ACS758 current sensors on the PDB through an ADS7128 (I2C) ---
+add_executable(current_sensor_node src/current_sensor_node.cpp)
+target_compile_features(current_sensor_node PRIVATE cxx_std_17)
+ament_target_dependencies(current_sensor_node rclcpp)
+install(TARGETS current_sensor_node DESTINATION lib/${PROJECT_NAME})
 
 # --- example_ros_node: minimal ROS API that awaits torque commands ---
 add_executable(example_ros_node src/example_ros_node.cpp)
@@ -104,11 +118,13 @@ if(BUILD_TESTING)
   target_include_directories(test_pp_motion PRIVATE src)
   target_compile_features(test_pp_motion PRIVATE cxx_std_17)
 
-  ament_add_gtest(test_pp_pdos test/test_pp_pdos.cpp)
-  ament_target_dependencies(test_pp_pdos ethercat_interface)
-  target_link_libraries(test_pp_pdos ethercat_generic_slave::ethercat_generic_slave yaml-cpp)
-  target_compile_definitions(test_pp_pdos PRIVATE
-    PP_TEST_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/pp_test.yaml")
+  if(WISCO_BUILD_PP_TEST)
+    ament_add_gtest(test_pp_pdos test/test_pp_pdos.cpp)
+    ament_target_dependencies(test_pp_pdos ethercat_interface)
+    target_link_libraries(test_pp_pdos ethercat_generic_slave::ethercat_generic_slave yaml-cpp)
+    target_compile_definitions(test_pp_pdos PRIVATE
+      PP_TEST_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/pp_test.yaml")
+  endif()
 
   ament_add_gtest(test_arm_law test/test_arm_law.cpp)
   target_include_directories(test_arm_law PRIVATE include)

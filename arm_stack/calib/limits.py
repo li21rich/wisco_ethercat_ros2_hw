@@ -1,5 +1,9 @@
 """Stage 3, `arm limits`: find the hard stops, set soft limits 3 deg inside.
 
+A joint with `hard_stops: false` in the arm config (no physical stop, only cables)
+is not driven past its URDF range: its soft limits are the URDF range, and the
+sweep below still checks it reaches both ends.
+
 Each joint moves slowly toward each URDF limit and on past it in Mode P, with
 gravity feedforward and 0x6072 clamped to the model gravity torque plus a
 margin. Confirm contact from sustained low speed and measured torque in the
@@ -54,19 +58,26 @@ def find_stop(ctx, j, direction, home, clamp, reference=None):
         qd[j] = direction * speed
         s = stream(client, [q_cmd.copy()], [qd], torque_clamp=clamp, ignore_soft_limits=True)
         lag = direction * (q_cmd[j] - s.q[j])
+        # stopped, behind the command, and pushing in the approach direction above gravity
+        pressing = (lag > STALL_ERROR and abs(s.qd[j]) < 0.02
+                    and direction * (s.tau[j] - model.gravity(s.q)[j]) >= contact_nm)
         if lag > 2 * STALL_ERROR:
-            print(f'{ctx.arm.names[j]}: search stopped at {s.q[j]/DEG:.2f} deg, '
-                  f'lag {lag/DEG:.2f} deg, speed {s.qd[j]:.3f} rad/s, torque {s.tau[j]:.2f} Nm')
+            # The command runs away from a joint that has stopped. A joint that stopped
+            # pressing into something is at its stop (the 40 ms confirm below cannot finish
+            # before the lag passes this bound on a stiff stop); anything else aborts.
+            if pressing:
+                stall_q = float(s.q[j])
+            else:
+                print(f'{ctx.arm.names[j]}: search stopped at {s.q[j]/DEG:.2f} deg, '
+                      f'lag {lag/DEG:.2f} deg, speed {s.qd[j]:.3f} rad/s, torque {s.tau[j]:.2f} Nm')
             break
-        if lag > STALL_ERROR and abs(s.qd[j]) < 0.02:
-            excess_torque = direction * (s.tau[j] - model.gravity(s.q)[j])
-            if excess_torque >= contact_nm:
-                if contact_since is None:
-                    contact_since = s.t
-                if s.t - contact_since >= 0.04:
-                    stall_q = float(s.q[j])
-                    break
-                continue
+        if pressing:
+            if contact_since is None:
+                contact_since = s.t
+            if s.t - contact_since >= 0.04:
+                stall_q = float(s.q[j])
+                break
+            continue
         contact_since = None
     # back off
     move_to(client, near, max_speed=0.3, torque_clamp=clamp)
@@ -82,6 +93,16 @@ def run(ctx: StageContext) -> StageResult:
     stops = {}
     ok = True
     for j, name in enumerate(arm.names):
+        if not arm.joints[j].hard_stops:
+            # No physical stop to find (config `hard_stops: false`): driving past the
+            # URDF range would only meet the cables. The URDF range is the soft limit.
+            soft[name] = [float(model.lower[j]), float(model.upper[j])]
+            stops[name] = None
+            lines.append('%-15s no hard stops (hard_stops: false) -> soft = URDF [%+7.2f, %+7.2f] deg'
+                         % (name, model.lower[j] / DEG, model.upper[j] / DEG))
+            flags.append('%s: no stop search (hard_stops: false); soft limits are the URDF range, '
+                         'check the cable routing reaches it' % name)
+            continue
         found = []
         for direction in (-1, +1):
             end = (model.upper[j] + SEARCH_BEYOND) if direction > 0 else (model.lower[j] - SEARCH_BEYOND)
@@ -97,6 +118,9 @@ def run(ctx: StageContext) -> StageResult:
             if stop is None:
                 flags.append('%s: no confirmed stop on bounded search (maximum %.0f deg past the %s limit)'
                              % (name, SEARCH_BEYOND / DEG, 'upper' if direction > 0 else 'lower'))
+                # find_stop leaves the joint 8 deg inside a limit, maybe in a high-gravity
+                # pose: go home before giving up. Nothing is written for an unconfirmed stop.
+                move_to(client, home, max_speed=0.3, torque_clamp=clamp)
                 return StageResult('limits', False, {'hard_stops_rad': stops}, {}, lines, flags)
             found.append(stop)
         lo, hi = found

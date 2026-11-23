@@ -73,6 +73,8 @@ rviz2 is recommended to visualize the servo state in real-time.
 
 ### Profile-position test
 
+`pp_test` (and `test_pp_pdos`) link the IgH master and ethercat_driver_ros2 directly, so they are built only where CMake finds both; elsewhere (a dev laptop, CI) the build skips them with a warning and everything else still builds.
+
 Stop any launch that owns IgH master 0. Run `ethercat slaves` and identify the target by its physical bus position. An isolated drive is at position 0. In the original seven-drive arm order J2 is at position 1 and J3 is at position 2.
 
 ```bash
@@ -242,7 +244,11 @@ zero offsets; absolute physical coordinates require that reference to be correct
 Passing results are saved to `config/calib/arm01/<date>_v<N>.yaml`, including
 reference readings, motion bounds, measured holding torques and validation
 results. The static fit estimates effective mass/center-of-mass combinations;
-individual physical masses can remain ambiguous. A failed run preserves the
+individual physical masses can remain ambiguous. Its validation poses come from
+the same few-degree envelope, so the file records it as `local_passed` with the
+fit poses' span, and `passed` (which enables full-arm gravity feedforward on the
+next launch) only when the fit poses span at least 30° on every gravity-loaded
+joint. Run `arm gravity --fit-masses` over the full range for that. A failed run preserves the
 previous calibration. Measurements are limited to the saved local envelope.
 
 After success the command stays running with the arm held in position. Support
@@ -503,7 +509,7 @@ ros2 run wisco_ethercat_ros2_hw arm export lerobot out_dir ~/arm_logs/A.mcap ~/a
 | Powered arm check | `arm bringup --soak-s 10` with the powered launch running | PASS/FAIL report for confirmed small jogs and holding |
 | 1 Indicator | `arm indicator` | nothing (report: 90° step vs protractor, torque sign, 0x6077 units, nulls) |
 | Optional jig re-zero | `arm zero` with motor enabling disabled | `zero_offsets_rad` |
-| Optional powered stop search | `arm limits` | `soft_limits_rad` |
+| Optional powered stop search | `arm limits` | `soft_limits_rad` (3° inside each stop; the URDF range for a `hard_stops: false` joint) |
 | 4 Torque constant | `arm kt` | `kt_output_nm_per_a` |
 | 5 Gravity comp | `arm gravity --fit-masses` | `link_inertials`, gravity-fit validation |
 | 6 Friction | `arm friction` | `friction` |
@@ -586,7 +592,7 @@ Mock EtherCAT (`test/mock/`): `RmdxMockSlave` is an RMD-X drive as a CiA402 slav
 Assumptions that need the bench (also in the URDF ledger):
 
 - Zeros and signs are the CAD export's operating coordinates (mapped from its Onshape mates), not encoder readings: `arm commission` measures the initial encoder coordinates and usable limits, `arm zero` supports subsequent jig-based re-zeroing, and hardware `arm bringup` checks small individually confirmed jogs (J3 is mounted inverted, so its `direction` may need to be −1). **q = 0 is the arm stretched out forward**, its worst gravity load, so the model-based calibration stages use `home_pose_rad` in `arm01.yaml` (J1 +90°, elbow +45°: upper arm hanging, peg tip 10 cm above the stand's base plate), which is also the default jig pose. Hanging fully straight (or at the export's CAD capture, J1 80.8, J4 19.7, J5 −95, J6 28°) the peg tip is level with the base plate.
-- Ranges are the export's operating ROM (J1 −90..+180, J2 0..190, J3 ±90, J4 0..130, J5 ±90, J6 ±35, J7 ±90°), not certified stops: J1's stops are unverified, J2's contact onset is at −0.1° and J6's at ±35.1°. `arm limits` finds the real stops.
+- Ranges are the export's operating ROM (J1 −90..+180, J2 0..190, J3 ±90, J4 0..130, J5 ±90, J6 ±35, J7 ±90°), not certified stops: J1's stops are unverified, J2's contact onset is at −0.1° and J6's at ±35.1°. `arm limits` finds the real stops, except on J1: CAD found no J1 stop, so `hard_stops: false` in `arm01.yaml` keeps −90..+180° as its soft limits and `arm limits` never drives it past them (only the cables would stop it).
 - The wrist is a near-parallelogram (output/crank 0.996..1.004): the J6 encoder drives `wrist_pitch` (the output pivot) 1:1, within 0.25° over ±35°; the crank and coupler are mimic joints. The export's `model.py` has the exact loop.
 - Link masses are the export's audited model (provisional actuator masses, solid PLA peg, 178 g harness estimate; moving mass 3.92 kg) until the weighed values land in `link_masses_kg`.
 - The ArmController writes each command's torque clamp to 0x6072 (`max_torque` command interface, `write_max_torque: true` in arm mode), so the drive's own CSP loop is capped too, which matters when `arm limits` pushes into a hard stop. 0x6072 is in the default RxPDO 0x1600 (MyActuator ESI). **0x6072 = 0 is the drive's stall-current limit, not zero torque**, so the controller never writes less than 1% of the joint's `max_torque`.
@@ -618,8 +624,11 @@ The node is a standalone ROS 2 node built from `src/current_sensor_node.cpp`. Pa
 | `i2c_address` | `0x10` | ADS7128 7-bit address |
 | `poll_period_ms` | `100` | ms between sweeps of all channels |
 | `print_raw_counts` | `false` | also print the raw ADC code per channel |
+| `sensor_supply_v` | `3.3` | ACS758 VCC: its sensitivity is ratiometric to it |
+| `sensitivity_mv_per_a_at_5v` | `13.2` | datasheet sensitivity, quoted at VCC = 5 V |
 
-Zero-current offsets are hardcoded at 2048 counts (VCC/2). Run with `print_raw_counts:=true` with the rails unloaded to read each channel's true zero, then update `kSensors` in `current_sensor_node.cpp`.
+The ACS758's output scales with its supply: 13.2 mV/A at 5 V is 8.71 mV/A on the
+3.3 V sensor rail, and using the 5 V figure there reads 34% low. Zero-current offsets are hardcoded at 2048 counts (VCC/2). Run with `print_raw_counts:=true` with the rails unloaded to read each channel's true zero, then update `kSensors` in `current_sensor_node.cpp`.
 
 ---
 

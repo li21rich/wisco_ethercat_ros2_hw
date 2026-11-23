@@ -82,6 +82,7 @@ class JointSpec:
     kd: float
     nulls: List[str] = field(default_factory=list)  # fields that fell back to the model table
     serial: Optional[str] = None                    # actuator serial (bench rig runs)
+    hard_stops: bool = True                         # false: no physical stop; `arm limits` keeps the URDF range
 
 
 @dataclass
@@ -185,6 +186,7 @@ def load_arm(path: str = 'config/arms/arm01.yaml',
             kd=float(gains.get('kd', 0.0)),
             nulls=nulls,
             serial=None if row.get('serial') is None else str(row['serial']),
+            hard_stops=bool(row.get('hard_stops', True)),
         ))
     return ArmConfig(
         arm=raw['arm'], path=path, urdf=resolve(raw.get('urdf', 'urdf/arm01/arm01.urdf')),

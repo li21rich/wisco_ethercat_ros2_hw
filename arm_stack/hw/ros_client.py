@@ -55,7 +55,8 @@ def encode_command(cmd: Command, n: int) -> list:
 def decode_state(data, n: int):
     d = np.asarray(data, float)
     if len(d) not in (STATE_HEADER + 5 * n, STATE_HEADER + 7 * n):
-        raise ValueError('state has %d values, expected %d' % (len(d), STATE_HEADER + 5 * n))
+        raise ValueError('state has %d values, expected %d or %d'
+                         % (len(d), STATE_HEADER + 5 * n, STATE_HEADER + 7 * n))
     b = lambda k: d[STATE_HEADER + k * n:STATE_HEADER + (k + 1) * n]  # noqa: E731
     return {'t': d[0], 'mode': 'T' if d[1] > 0.5 else 'P', 'fallback': d[2] > 0.5,
             'limit_hit': d[3] > 0.5, 'clamped': d[4] > 0.5, 'q': b(0), 'qd': b(1), 'tau': b(2),

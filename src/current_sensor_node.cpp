@@ -36,14 +36,12 @@ namespace
 // The ADS7128 uses AVDD as its reference, and AVDD is the shared 3.3 V sensor rail.
 constexpr double kAdcRefVolts = 3.3;
 
-// ACS758 (bidirectional) sensitivity, as specified by the team.
-// NOTE: the datasheet sensitivity is ratiometric to VCC and quoted at 5 V.
-// If this value is the 5 V figure, the 3.3 V-rail equivalent is
-// 13.2 * 3.3 / 5.0 = ~8.71 mV/A. See the accompanying notes.
-constexpr double kSensitivityMvPerA = 13.2;
-
-constexpr double kAmpsPerCount =
-  (kAdcRefVolts / Ads7128::kFullScaleCounts) * 1000.0 / kSensitivityMvPerA;
+// ACS758 (bidirectional) sensitivity. The datasheet figure (13.3 mV/A for the
+// 150B; the team's 13.2) is quoted at VCC = 5 V, and the output is ratiometric to
+// VCC: sensitivity and zero both scale with the sensor's supply. On the 3.3 V
+// sensor rail that is 13.2 * 3.3 / 5.0 = 8.71 mV/A; using 13.2 there reads 34% low.
+// The node scales it by the sensor_supply_v parameter (default: the ADC rail).
+constexpr double kSensitivityMvPerAAt5V = 13.2;
 
 struct SensorChannel
 {
@@ -74,6 +72,8 @@ constexpr SensorChannel kSensors[] = {
 ///   i2c_address      (int,    16)            7-bit address (0x10 = ADDR pin unconnected)
 ///   poll_period_ms   (int,    100)           time between sweeps of all 7 channels
 ///   print_raw_counts (bool,   false)         also print the raw ADC code per channel
+///   sensor_supply_v  (double, 3.3)           ACS758 VCC; its sensitivity is ratiometric
+///   sensitivity_mv_per_a_at_5v (double, 13.2) datasheet sensitivity at VCC = 5 V
 ///
 /// Raw single-conversion samples only: there is deliberately no averaging or
 /// filtering, in software or in the ADC.
@@ -87,6 +87,14 @@ public:
     const auto i2c_address = this->declare_parameter<int64_t>("i2c_address", 0x10);
     const auto poll_period_ms = this->declare_parameter<int64_t>("poll_period_ms", 100);
     print_raw_ = this->declare_parameter<bool>("print_raw_counts", false);
+    const double supply_v = this->declare_parameter<double>("sensor_supply_v", kAdcRefVolts);
+    const double mv_per_a_5v =
+      this->declare_parameter<double>("sensitivity_mv_per_a_at_5v", kSensitivityMvPerAAt5V);
+    if (!(supply_v >= 3.0 && supply_v <= 5.5) || !(mv_per_a_5v > 0.0)) {
+      throw std::invalid_argument("sensor_supply_v must be 3.0..5.5 V (ACS758) and the sensitivity > 0");
+    }
+    const double mv_per_a = mv_per_a_5v * supply_v / 5.0;
+    amps_per_count_ = (kAdcRefVolts / Ads7128::kFullScaleCounts) * 1000.0 / mv_per_a;
 
     if (i2c_address < 0x08 || i2c_address > 0x77) {
       throw std::invalid_argument("i2c_address must be a valid 7-bit address (0x08..0x77)");
@@ -124,7 +132,7 @@ private:
           sensor.name, static_cast<int>(sensor.adc_channel), adc_.last_error().c_str());
         continue;
       }
-      const double amps = (static_cast<double>(counts) - sensor.zero_counts) * kAmpsPerCount;
+      const double amps = (static_cast<double>(counts) - sensor.zero_counts) * amps_per_count_;
       if (print_raw_) {
         std::printf(" %s=%+8.3fA(%4u)", sensor.name, amps, static_cast<unsigned>(counts));
       } else {
@@ -136,6 +144,7 @@ private:
 
   Ads7128 adc_;
   bool print_raw_{false};
+  double amps_per_count_{0.0};
   std::chrono::steady_clock::time_point start_{std::chrono::steady_clock::now()};
   rclcpp::TimerBase::SharedPtr timer_;
 };

@@ -17,14 +17,17 @@ def models():
         return yaml.safe_load(f)['models']
 
 
-def test_arm01_has_no_nulls_and_configured_clamps():
+def test_arm01_has_no_nulls_and_bringup_clamps():
     arm = load_arm(ARM01)
     table = models()
     for j in arm.joints:
         m = table[j.model]
         assert j.nulls == [], (j.name, j.nulls)
-        assert j.max_torque_nm == pytest.approx(m['peak_effort_nm'])
+        # clamps start at the bring-up limits, under the datasheet ratings, until the
+        # arm is verified (signs, zeros, measured stops)
+        assert j.max_torque_nm == pytest.approx(m['bringup_effort_limit_nm'])
         assert j.max_vel_rad_s == pytest.approx(m['bringup_velocity_limit_rad_s'])
+        assert j.max_torque_nm < m['rated_torque_nm'] < m['peak_effort_nm']
         assert j.rated_current_a == pytest.approx(m['rated_current_a'])
         assert j.counts_per_rev == m['counts_per_rev']
 
