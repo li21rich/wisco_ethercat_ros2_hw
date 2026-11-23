@@ -1,0 +1,81 @@
+# Written by `arm reference`. Never edit by hand; rerun the stage.
+version: 1
+arm_serial: arm01
+date: '2026-11-22'
+git_sha: 39e63c8
+joint_config_hash: b5f6880ea09a3023
+stage: reference
+zero_offsets_rad:
+  shoulder_pitch: 1.1954064606011423
+  shoulder_roll: 0.04530037014224784
+  shoulder_yaw: 0.8087434335130829
+  elbow: 2.455088314111347
+  forearm_yaw: 1.6222805569883083
+  wrist_pitch: -0.00800546223677819
+  wrist_yaw: -0.566086847629423
+soft_limits_rad:
+  shoulder_pitch:
+  - null
+  - null
+  shoulder_roll:
+  - null
+  - null
+  shoulder_yaw:
+  - null
+  - null
+  elbow:
+  - null
+  - null
+  forearm_yaw:
+  - null
+  - null
+  wrist_pitch:
+  - null
+  - null
+  wrist_yaw:
+  - null
+  - null
+kt_output_nm_per_a:
+  shoulder_pitch: null
+  shoulder_roll: null
+  shoulder_yaw: null
+  elbow: null
+  forearm_yaw: null
+  wrist_pitch: null
+  wrist_yaw: null
+link_inertials: null
+friction: null
+latency_ms: null
+joint_stiffness_nm_per_rad: null
+kinematic_overlay: null
+pace: null
+validation: null
+coordinate_frame: relative
+local_gravity: null
+gravity_validation: null
+commissioning:
+  method: passive_relative_reference
+  verified: false
+  encoder_reference: arbitrary_resting_pose
+  reference_counts:
+  - 24937.083333333332
+  - 945.0
+  - 16871.0
+  - 51215.0
+  - 33842.0
+  - -167.0
+  - -11809.0
+  reference_pose_rad:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  direction_and_scale: configured
+  mechanical_stops_measured: false
+  range_kind: unmeasured
+  references: null
+  gravity_metrics: null
+  local_checks_passed: false

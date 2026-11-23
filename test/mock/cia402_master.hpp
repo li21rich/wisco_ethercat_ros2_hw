@@ -73,6 +73,7 @@ struct DriveCommands
   double velocity = std::numeric_limits<double>::quiet_NaN();
   double effort = std::numeric_limits<double>::quiet_NaN();
   double torque_offset = std::numeric_limits<double>::quiet_NaN();
+  double velocity_offset = std::numeric_limits<double>::quiet_NaN();   // 0x60B1, rad/s
   double mode_of_operation = std::numeric_limits<double>::quiet_NaN();
   double reset_fault = std::numeric_limits<double>::quiet_NaN();
   double max_torque = std::numeric_limits<double>::quiet_NaN();   // 0x6072 in N m, when mapped
@@ -137,6 +138,8 @@ public:
       write_raw<int16_t>(scaling.effort_command_factor * cmd.effort) : 0;
     rx_.torque_offset = std::isfinite(cmd.torque_offset) ?
       write_raw<int16_t>(scaling.effort_command_factor * cmd.torque_offset) : 0;
+    rx_.velocity_offset = std::isfinite(cmd.velocity_offset) ?
+      write_raw<int32_t>(scaling.velocity_command_factor * cmd.velocity_offset) : 0;
     rx_.max_torque = std::isfinite(cmd.max_torque) ?
       write_raw<int16_t>(std::fabs(scaling.effort_command_factor * cmd.max_torque)) : max_torque_permille;
     rx_.mode_of_operation = std::isfinite(cmd.mode_of_operation) ?

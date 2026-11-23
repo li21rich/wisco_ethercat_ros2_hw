@@ -117,6 +117,9 @@ def test_dc_sync_and_torque_cap(tmp_path):
     hw = make(tmp_path, [{'name': 'a', 'bus_position': 0, 'model': 'x4_10'},
                          {'name': 'b', 'bus_position': 1, 'model': 'x4_36',
                           'max_torque_permille': 100}])
+    hw.defaults['dc_assign_activate'] = 0       # SM-synchron: no DC word
+    assert 'assign_activate' not in hw.slave_config(hw.joints[0])
+    hw.defaults['dc_assign_activate'] = 0x0300  # DC-synchron (RT target)
     a = hw.slave_config(hw.joints[0])
     b = hw.slave_config(hw.joints[1])
     assert a['assign_activate'] == 0x0300
@@ -190,7 +193,8 @@ def test_arm01_updated_firmware_interfaces(tmp_path):
     assert hw.arm_controller_parameters()['torque_offset_enabled'] == [True] * 7
     for joint in hw.joints:
         cfg = hw.slave_config(joint)
-        assert cfg['assign_activate'] == 0x0300
+        dc = int(hw.defaults.get('dc_assign_activate', 0))
+        assert cfg.get('assign_activate', 0) == dc
         assert [pdo['index'] for pdo in cfg['rpdo']] == [0x1600, 0x1603]
         assert cfg['rpdo'][0]['channels'][-1]['index'] == 0x2ffd
         assert cfg['tpdo'][0]['channels'][-1]['index'] == 0x2ffe

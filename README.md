@@ -283,7 +283,31 @@ starts near a prescribed pose, holds the arm, and approaches selected mechanical
 stops in a sequence specific to the arm. Low velocity and measured torque indicate
 contact. The script repositions the arm, disables the drives and writes motor zeros.
 
-For arm01, exercise this approach offline with the EtherCAT arm simulator:
+On the arm (no angle gauge needed), stop the arm launch, support the arm roughly
+at `home_pose_rad` (each joint within `--stop-tolerance-deg`, default 10) and run:
+
+```bash
+ros2 run wisco_ethercat_ros2_hw arm autocal --stop-zero
+```
+
+It prints the rough pose and, per joint, the stop it will use (the nearer CAD
+contact angle), then asks for `yes`. It captures the encoders with drives
+disabled, starts powered holding on the rough reference and waits for Enter once
+the support is removed. Each joint with hard stops then creeps (6 deg/s, others
+held, no gravity feedforward) into its stop twice under a 0x6072 clamp of
+modeled gravity plus 12% of peak, capped at 90% of the bring-up clamp. Contact is
+torque above what the joint drew while moving freely. The two contacts must repeat
+within 0.25 deg and lie within the tolerance of the CAD angle; the encoder zero is
+set so the contact reads the CAD angle. Soft limits go 3 deg inside each measured
+stop (the URDF range on the other side). J1 (`hard_stops: false`) is not driven
+into anything and keeps the rough reference: check it with `arm indicator`.
+Nothing is saved unless every joint passes. After `Stop-zero PASS`, support the
+arm, Ctrl-C and relaunch to load the new version.
+
+The contact angles are the CAD export's conditional contacts, not measured stops,
+so a constant offset in `arm indicator` afterwards points at the CAD angle.
+
+Exercise the same idea offline with the EtherCAT arm simulator:
 
 ```bash
 ros2 run wisco_ethercat_ros2_hw arm autocal --stop-zero --sim --quick --fresh

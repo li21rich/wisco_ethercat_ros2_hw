@@ -120,6 +120,10 @@ private:
   std::vector<Ref> cmd_pos_, cmd_eff_, cmd_mode_, cmd_max_;
   std::vector<bool> torque_offset_enabled_;
   std::vector<hardware_interface::LoanedCommandInterface *> cmd_off_;
+  // 0x60B1 velocity offset (CSP feedforward), on the joints with torque_offset
+  std::vector<hardware_interface::LoanedCommandInterface *> cmd_voff_;
+  std::vector<double> vff_;          // low-passed velocity of the CSP target (rad/s)
+  double velocity_ff_gain_ = 1.0;
   std::vector<StateRef> st_pos_, st_vel_, st_eff_, st_status_, st_mode_;
   bool drive_feedback_ = false;
   bool hold_on_startup_ = false;

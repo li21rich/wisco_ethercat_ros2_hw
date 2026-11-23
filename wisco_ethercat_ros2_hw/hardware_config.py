@@ -27,12 +27,14 @@ CONTROL_MODES = {
     # The arm stack's Mode P / Mode T (spec: Hardware assumptions): starts in
     # CSP (8); the ArmController switches 0x6060 to CST (10) at runtime. Each
     # joint exports position (0x607A), effort (0x6071), torque_offset (0x60B2,
-    # gravity + friction feedforward in CSP), mode_of_operation (0x6060) and
+    # gravity + friction feedforward in CSP), velocity_offset (0x60B1, the planned
+    # velocity as CSP feedforward), mode_of_operation (0x6060) and
     # max_torque (0x6072, the command's torque clamp, which caps the drive's
     # own CSP loop too).
     'arm': (8, 'arm'),
 }
-ARM_COMMAND_INTERFACES = ['position', 'effort', 'torque_offset', 'mode_of_operation', 'max_torque']
+ARM_COMMAND_INTERFACES = ['position', 'effort', 'torque_offset', 'velocity_offset', 'mode_of_operation',
+                          'max_torque']
 
 MOVABLE_JOINT_TYPES = ('revolute', 'continuous', 'prismatic')
 
@@ -291,6 +293,10 @@ class HardwareConfig:
                 elif index == 0x60b2:
                     ch['factor'] = joint.effort_command()
                     ch['command_interface'] = 'torque_offset'
+                elif index == 0x60b1:
+                    # CSP velocity feedforward: same units and sign as 0x60FF
+                    ch['factor'] = joint.velocity_command()
+                    ch['command_interface'] = 'velocity_offset'
                 elif index == 0x60ff:
                     ch['factor'] = joint.velocity_command()
                     if self.command_interface == 'velocity':
@@ -338,7 +344,8 @@ class HardwareConfig:
                 'position': joint.bus_position,
                 'slave_config': path,
                 'command_interfaces': [name for name in self.command_interfaces
-                                       if name != 'torque_offset' or joint.supports_torque_offset],
+                                       if name not in ('torque_offset', 'velocity_offset') or
+                                       joint.supports_torque_offset],
             })
         manifest = {
             'use_mock_hardware': bool(use_mock_hardware),
@@ -387,6 +394,8 @@ class HardwareConfig:
                 bool(self.calibration.get('link_inertials')) and
                 (self.calibration.get('gravity_validation') or {'passed': True}).get('passed', False),
             'torque_offset_enabled': [j.supports_torque_offset for j in self.joints],
+            # planned velocity into 0x60B1 in CSP (0: off); joints without 0x1603 get none
+            'velocity_ff_gain': float(arm_config.get('velocity_ff_gain', 1.0)),
             'calibration_file': calibration_file or '',
         }
         local = self.calibration.get('local_gravity')

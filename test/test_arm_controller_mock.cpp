@@ -419,6 +419,8 @@ TEST_F(ArmMock, MixedFirmwareWithoutTorqueOffset)
     const auto claimed = controller->command_interface_configuration().names;
     EXPECT_EQ(std::count(claimed.begin(), claimed.end(), "j1/torque_offset"), 0);
     EXPECT_EQ(std::count(claimed.begin(), claimed.end(), "j2/torque_offset"), 1);
+    EXPECT_EQ(std::count(claimed.begin(), claimed.end(), "j1/velocity_offset"), 0);
+    EXPECT_EQ(std::count(claimed.begin(), claimed.end(), "j2/velocity_offset"), 1);
 
     const std::vector<double> target = {0.2, -0.3};
     // The initial watchdog fallback and active torque mode use 0x6071 on
@@ -740,6 +742,37 @@ TEST_F(ArmMock, MaxTorqueFollowsCommandClampInCsp)
   a.h->stop_stream();
   a.h->cycle(100);
   EXPECT_NEAR(a.cmd(1).max_torque, kMaxTorque[1], 1e-9);
+}
+
+// CSP velocity feedforward (0x60B1): the CSP target's velocity while it moves,
+// 0 while it holds, so the drive does not wait for position error (stick-slip).
+TEST_F(ArmMock, VelocityFeedforwardFollowsTheMovingTarget)
+{
+  Arm a = make_arm(false, 0, true, false, true);
+  const std::vector<double> q0 = {0.2, -0.3};
+  a.h->stream(command(kModeP, q0));
+  a.h->cycle(200);
+  for (size_t i = 0; i < 2; ++i) {
+    EXPECT_NEAR(a.cmd(i).velocity_offset, 0.0, 1e-3) << "holding: no feedforward";
+  }
+  // a far target: the controller ramps the CSP target at its velocity limit
+  a.h->stream(command(kModeP, {q0[0] + 0.5, q0[1]}));
+  a.h->cycle(6);
+  double peak = 0.0;
+  for (int k = 0; k < 60; ++k) {
+    a.h->cycle();
+    peak = std::max(peak, a.cmd(0).velocity_offset);
+    EXPECT_GE(a.cmd(0).velocity_offset, -1e-9) << "cycle " << k;     // the direction of motion
+    EXPECT_NEAR(a.cmd(1).velocity_offset, 0.0, 1e-3) << "cycle " << k;   // j2 does not move
+  }
+  EXPECT_GT(peak, 0.05) << "no feedforward while the target moved";
+  EXPECT_NE(a.h->hw().master(0).rx().velocity_offset, 0);   // reached 0x60B1
+  a.h->cycle(2000);
+  EXPECT_NEAR(a.cmd(0).velocity_offset, 0.0, 1e-3) << "arrived: feedforward back to 0";
+  // watchdog hold: 0
+  a.h->stop_stream();
+  a.h->cycle(100);
+  EXPECT_DOUBLE_EQ(a.cmd(0).velocity_offset, 0.0);
 }
 
 // A zero torque clamp must not reach 0x6072 as 0, which the drive reads as

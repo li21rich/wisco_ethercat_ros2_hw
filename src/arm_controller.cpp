@@ -48,6 +48,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     }
     auto_declare<bool>("write_max_torque", false);
     auto_declare<std::vector<bool>>("torque_offset_enabled", std::vector<bool>{});
+    auto_declare<double>("velocity_ff_gain", 1.0);
     auto_declare<std::string>("calibration_file", "");
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
@@ -137,6 +138,12 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   }
   write_max_torque_ = node->get_parameter("write_max_torque").as_bool();
   torque_offset_enabled_ = node->get_parameter("torque_offset_enabled").as_bool_array();
+  velocity_ff_gain_ = node->get_parameter("velocity_ff_gain").as_double();
+  if (!std::isfinite(velocity_ff_gain_) || velocity_ff_gain_ < 0.0 || velocity_ff_gain_ > 1.5) {
+    RCLCPP_ERROR(logger, "'velocity_ff_gain' must be in [0, 1.5], got %f", velocity_ff_gain_);
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  vff_.assign(n, 0.0);
   if (torque_offset_enabled_.empty()) {torque_offset_enabled_.assign(n, true);}
   if (torque_offset_enabled_.size() != n) {
     RCLCPP_ERROR(logger, "'torque_offset_enabled' needs %zu entries, got %zu", n,
@@ -250,9 +257,12 @@ controller_interface::InterfaceConfiguration ArmController::command_interface_co
 {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for (const char * iface : {"position", "effort", "torque_offset", "mode_of_operation"}) {
+  for (const char * iface : {"position", "effort", "torque_offset", "velocity_offset",
+      "mode_of_operation"})
+  {
     for (size_t i = 0; i < joints_.size(); ++i) {
-      if (std::string(iface) != "torque_offset" || torque_offset_enabled_[i]) {
+      const std::string name(iface);
+      if ((name != "torque_offset" && name != "velocity_offset") || torque_offset_enabled_[i]) {
         config.names.push_back(joints_[i] + "/" + iface);
       }
     }
@@ -290,16 +300,19 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "velocity", st_vel_) &&
     controller_interface::get_ordered_interfaces(state_interfaces_, joints_, "effort", st_eff_);
   cmd_off_.assign(joints_.size(), nullptr);
-  for (size_t i = 0; i < joints_.size(); ++i) {
+  cmd_voff_.assign(joints_.size(), nullptr);
+  for (size_t i = 0; ok && i < joints_.size(); ++i) {
     if (!torque_offset_enabled_[i]) {continue;}
-    const auto name = joints_[i] + "/torque_offset";
-    const auto iface = std::find_if(command_interfaces_.begin(), command_interfaces_.end(),
-      [&](const auto & candidate) {return candidate.get_name() == name;});
-    if (iface == command_interfaces_.end()) {
-      ok = false;
-      break;
+    for (auto * slot : {&cmd_off_[i], &cmd_voff_[i]}) {
+      const auto name = joints_[i] + (slot == &cmd_off_[i] ? "/torque_offset" : "/velocity_offset");
+      const auto iface = std::find_if(command_interfaces_.begin(), command_interfaces_.end(),
+        [&](const auto & candidate) {return candidate.get_name() == name;});
+      if (iface == command_interfaces_.end()) {
+        ok = false;
+        break;
+      }
+      *slot = &*iface;
     }
-    cmd_off_[i] = &*iface;
   }
   if (ok && write_max_torque_) {
     ok = controller_interface::get_ordered_interfaces(command_interfaces_, joints_, "max_torque", cmd_max_);
@@ -322,6 +335,8 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     cmd_pos_[i].get().set_value(q_target_prev_[i]);
     cmd_eff_[i].get().set_value(0.0);
     if (cmd_off_[i]) {cmd_off_[i]->set_value(0.0);}
+    if (cmd_voff_[i]) {cmd_voff_[i]->set_value(0.0);}
+    vff_[i] = 0.0;
     cmd_mode_[i].get().set_value(static_cast<double>(arm::kCsp));
     if (write_max_torque_) {cmd_max_[i].get().set_value(cfg_.max_torque[i]);}
   }
@@ -345,6 +360,7 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
     cmd_pos_[i].get().set_value(st_pos_[i].get().get_value());
     cmd_eff_[i].get().set_value(0.0);
     if (cmd_off_[i]) {cmd_off_[i]->set_value(0.0);}
+    if (cmd_voff_[i]) {cmd_voff_[i]->set_value(0.0);}
     cmd_mode_[i].get().set_value(static_cast<double>(arm::kCsp));
   }
   command_buffer_.writeFromNonRT(std::shared_ptr<Command>());
@@ -463,12 +479,29 @@ controller_interface::return_type ArmController::update(
     }
     double target = q_[i];   // Mode T: keeps CSP re-entry bumpless
     double tau = out_.tau[i];
+    // Velocity feedforward: the CSP target's own velocity, so the drive moves with
+    // the target instead of waiting for position error to beat the gearbox
+    // friction (stick-slip). Derived from the target actually sent: 0 while holding,
+    // and it follows the ease-in and rate limit. 20 ms low-pass for the uneven
+    // spacing of the Python setpoints.
+    double vff = 0.0;
     if (mode_p) {
       const double goal =
         arm::ease_in(q_switch_[i], out_.q_target[i], since_ease_[i], blend_s_);
       target = arm::rate_limit(q_target_prev_[i], goal, cfg_.max_velocity[i] * dt);
+      const double alpha = dt / (dt + 0.02);
+      vff_[i] += alpha * ((target - q_target_prev_[i]) / dt - vff_[i]);
+      vff = std::clamp(velocity_ff_gain_ * vff_[i], -cfg_.max_velocity[i], cfg_.max_velocity[i]);
       q_target_prev_[i] = target;
     } else {
+      vff_[i] = 0.0;
+    }
+    if (!enabled_[i] || pending || hold) {
+      vff_[i] = 0.0;
+      vff = 0.0;
+    }
+    if (cmd_voff_[i]) {cmd_voff_[i]->set_value(vff);}
+    if (!mode_p) {
       tau = arm::blend(tau_switch_[i], out_.tau[i], since_switch_, blend_s_);
       out_.tau[i] = tau;
     }

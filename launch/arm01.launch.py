@@ -37,7 +37,7 @@ def generate_launch_description():
         'joints_file': os.path.join(share, 'config', 'arms', 'arm01.yaml'),
         'calibration_file': latest_calibration(share),
         'control_mode': '',
-        'update_rate': '100',
+        'update_rate': '250',
         'joint_state_rate': '50',
         'command_timeout': '0.05',
         'use_mock_hardware': 'false',

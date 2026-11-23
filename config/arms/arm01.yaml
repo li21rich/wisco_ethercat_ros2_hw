@@ -82,7 +82,9 @@ joints:
     counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
     rated_current_a: 6.1  # datasheet rms; 0x6075 holds the drive value (read over SDO)
-    max_torque_nm: 6.0  # bring-up clamp (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_torque_nm: 10.0  # raised from the 6 Nm bring-up clamp: the real forearm needs ~5 Nm at
+                         # 26 deg elbow (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_torque_permille: 1035  # 0x6072 drive cap 12.0 Nm, 1.2 x the clamp (model default 620 = 7.2 Nm)
     max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 83 rpm = 8.7 rad/s)
     gains: {kp: 30.0, kd: 1.0}
   - name: elbow               # J4, ROM 0..+130 deg
@@ -93,7 +95,10 @@ joints:
     counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
     rated_current_a: 6.1  # datasheet rms; 0x6075 holds the drive value (read over SDO)
-    max_torque_nm: 6.0  # bring-up clamp (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_torque_nm: 15.0  # above the 10.5 Nm rating: stop-zero stalled lifting the forearm at
+                         # 7.2 Nm (+31.7 deg); it needs ~10 Nm at horizontal (x4_36 peak 34 Nm)
+    use_peak_torque_limit: true  # short tests only: the peak is not a continuous rating
+    max_torque_permille: 1553  # 0x6072 drive cap 18.0 Nm, 1.2 x the clamp (model default 620 = 7.2 Nm)
     max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 83 rpm = 8.7 rad/s)
     gains: {kp: 30.0, kd: 1.0}
   - name: forearm_yaw         # J5, ROM -90..+90 deg
@@ -104,7 +109,9 @@ joints:
     counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
     rated_current_a: 6.1  # datasheet rms; 0x6075 holds the drive value (read over SDO)
-    max_torque_nm: 6.0  # bring-up clamp (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_torque_nm: 10.0  # raised from the 6 Nm bring-up clamp: the real forearm needs ~5 Nm at
+                         # 26 deg elbow (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_torque_permille: 1035  # 0x6072 drive cap 12.0 Nm, 1.2 x the clamp (model default 620 = 7.2 Nm)
     max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 83 rpm = 8.7 rad/s)
     gains: {kp: 20.0, kd: 0.6}
   - name: wrist_pitch         # J6, ROM -35..+35 deg

@@ -342,7 +342,12 @@ def main(argv=None) -> int:
     stops.add_argument('--verify-stop', metavar='JOINT',
                        help='autocal: compare a hand-seated stop with its reference angle, drives disabled')
     stops.add_argument('--stop-zero', action='store_true',
-                   help='autocal: simulate zeroing each axis against a known mechanical stop')
+                   help='autocal: zero each axis against its nearer mechanical stop '
+                        '(hardware from a rough home pose; --sim: simulated)')
+    p.add_argument('--stop-tolerance-deg', type=float, default=None,
+                   help='autocal --stop-zero: how far off the rough home pose may be per joint (default 10)')
+    p.add_argument('--stop-pose', choices=['home', 'hanging'], default=None,
+                   help='autocal --stop-zero: rough starting pose, home_pose_rad or hanging (elbow at 0)')
     p.add_argument('--travel-deg', type=float, default=None,
                    help='autocal: maximum travel on each side, degrees (relative default 10, CAD default 3)')
     p.add_argument('--arm', default='config/arms/arm01.yaml', help='joint config path or name (bench01)')

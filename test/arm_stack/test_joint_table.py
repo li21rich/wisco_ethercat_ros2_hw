@@ -23,11 +23,12 @@ def test_arm01_has_no_nulls_and_bringup_clamps():
     for j in arm.joints:
         m = table[j.model]
         assert j.nulls == [], (j.name, j.nulls)
-        # clamps start at the bring-up limits, under the datasheet ratings, until the
-        # arm is verified (signs, zeros, measured stops)
-        assert j.max_torque_nm == pytest.approx(m['bringup_effort_limit_nm'])
+        # clamps start at the bring-up limits and may be raised (arm01's x4_36 joints: the
+        # real forearm load), but stay under the datasheet rated torque
+        assert j.max_torque_nm >= m['bringup_effort_limit_nm'] - 1e-9
         assert j.max_vel_rad_s == pytest.approx(m['bringup_velocity_limit_rad_s'])
-        assert j.max_torque_nm < m['rated_torque_nm'] < m['peak_effort_nm']
+        ceiling = m['peak_effort_nm'] if j.name == 'elbow' else m['rated_torque_nm']   # elbow: peak flag
+        assert j.max_torque_nm < ceiling and m['rated_torque_nm'] < m['peak_effort_nm']
         assert j.rated_current_a == pytest.approx(m['rated_current_a'])
         assert j.counts_per_rev == m['counts_per_rev']
 
@@ -53,3 +54,13 @@ def test_clamp_above_datasheet_is_refused(tmp_path):
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match='max_vel_rad_s 30 is above'):
         load_arm(str(path))
+
+
+def test_arm01_drive_caps_sit_above_the_clamps():
+    with open(ARM01) as f:
+        rows = {r['name']: r for r in yaml.safe_load(f)['joints']}
+    table = models()
+    for j in load_arm(ARM01).joints:
+        m = table[j.model]
+        cap = rows[j.name].get('max_torque_permille', m['max_torque_permille']) * m['effort_nm_per_permille']
+        assert j.max_torque_nm < cap < m['peak_effort_nm'], j.name
