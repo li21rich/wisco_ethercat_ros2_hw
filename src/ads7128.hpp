@@ -35,9 +35,15 @@ namespace wisco
 ///
 /// Talks to the chip through the Linux i2c-dev interface (/dev/i2c-N) and uses
 /// the ADC's manual mode: every read_raw() selects one channel (MANUAL_CHID),
-/// then a plain 2-byte read starts a conversion (the chip stretches SCL for
-/// ~1 us) and returns the result. One conversion per call: no averaging
-/// (OSR_CFG left at reset), no CRC, no filtering of any kind.
+/// then a plain 2-byte read starts a conversion and returns the result. The
+/// chip stretches SCL while it converts.
+///
+/// Hardware oversampling: OSR_CFG can be set to average 2..128 conversions per
+/// read. With averaging on, the chip stretches SCL until all samples are done
+/// and returns a 16-bit result (12 integer bits + 4 fractional bits) instead of
+/// the 12-bit code. read_raw() always reports counts in 12-bit units
+/// (0..4095.9375) so callers do not have to care which mode is active.
+/// No CRC, no software filtering.
 class Ads7128
 {
 public:
@@ -49,10 +55,28 @@ public:
   Ads7128(const Ads7128 &) = delete;
   Ads7128 & operator=(const Ads7128 &) = delete;
 
-  /// Open the bus, bind the slave address, then reset and offset-calibrate the ADC.
-  bool open(const std::string & device, uint8_t address)
+  /// Convert an oversampling ratio (1, 2, 4, ... 128) to the OSR_CFG[2:0] code.
+  /// Returns false if the ratio is not a supported power of two.
+  static bool osr_code_for_ratio(int ratio, uint8_t & code)
+  {
+    for (uint8_t c = 0; c <= 7; ++c) {
+      if ((1 << c) == ratio) {
+        code = c;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Open the bus, bind the slave address, reset and offset-calibrate the ADC,
+  /// then program OSR_CFG. oversampling_ratio is 1 (off), 2, 4, 8, 16, 32, 64 or 128.
+  bool open(const std::string & device, uint8_t address, int oversampling_ratio = 1)
   {
     close_device();
+    uint8_t osr_code = 0;
+    if (!osr_code_for_ratio(oversampling_ratio, osr_code)) {
+      return fail_msg("oversampling ratio must be 1, 2, 4, 8, 16, 32, 64 or 128");
+    }
     fd_ = ::open(device.c_str(), O_RDWR);
     if (fd_ < 0) {
       return fail_errno("open " + device);
@@ -62,15 +86,16 @@ public:
       close_device();
       return false;
     }
-    if (!initialise()) {
+    if (!initialise(osr_code)) {
       close_device();
       return false;
     }
     return true;
   }
 
-  /// Run one conversion on AIN<channel>. counts is the raw 12-bit code, 0..4095.
-  bool read_raw(uint8_t channel, uint16_t & counts)
+  /// Run one (possibly averaged) conversion on AIN<channel>.
+  /// counts is in 12-bit units: 0..4095 without averaging, 0..4095.9375 with it.
+  bool read_raw(uint8_t channel, double & counts)
   {
     if (fd_ < 0 || channel >= kNumChannels) {
       return fail_msg("read_raw: device not open or channel out of range");
@@ -79,8 +104,10 @@ public:
     if (!write_reg(kRegChannelSel, channel)) {
       return false;
     }
-    // The read frame's address ACK starts the conversion. Data is MSB-first
-    // D11..D4, then D3..D0 in the upper nibble of the second byte.
+    // The read frame's address ACK starts the conversion(s). Data is MSB-first.
+    // Without averaging: D11..D0 left-justified, low nibble 0 (APPEND_STATUS off).
+    // With averaging:    full 16-bit result, low nibble is the fractional part.
+    // Either way, the 16-bit word / 16 is the value in 12-bit counts.
     uint8_t rx[2] = {0, 0};
     const ssize_t n = ::read(fd_, rx, sizeof(rx));
     if (n < 0) {
@@ -89,7 +116,8 @@ public:
     if (n != static_cast<ssize_t>(sizeof(rx))) {
       return fail_msg("conversion read: short read");
     }
-    counts = static_cast<uint16_t>((rx[0] << 4) | (rx[1] >> 4));
+    const uint16_t word = static_cast<uint16_t>((rx[0] << 8) | rx[1]);
+    counts = static_cast<double>(word) / 16.0;
     return true;
   }
 
@@ -103,6 +131,7 @@ private:
   // Registers.
   static constexpr uint8_t kRegSystemStatus = 0x00;
   static constexpr uint8_t kRegGeneralCfg = 0x01;
+  static constexpr uint8_t kRegOsrCfg = 0x03;
   static constexpr uint8_t kRegChannelSel = 0x11;
 
   // SYSTEM_STATUS bits.
@@ -113,7 +142,10 @@ private:
   static constexpr uint8_t kGenCfgRst = 0x01;
   static constexpr uint8_t kGenCfgCal = 0x02;
 
-  bool initialise()
+  // OSR_CFG[2:0]: 0 = no averaging, n = 2^n samples (max 7 = 128).
+  static constexpr uint8_t kOsrMask = 0x07;
+
+  bool initialise(uint8_t osr_code)
   {
     uint8_t status = 0;
     if (!read_reg(kRegSystemStatus, status)) {
@@ -143,17 +175,36 @@ private:
     if (!write_reg(kRegGeneralCfg, kGenCfgCal)) {
       return false;
     }
-    for (int i = 0; i < 100; ++i) {
+    bool cal_done = false;
+    for (int i = 0; i < 100 && !cal_done; ++i) {
       uint8_t cfg = 0;
       if (!read_reg(kRegGeneralCfg, cfg)) {
         return false;
       }
       if (!(cfg & kGenCfgCal)) {
-        return true;
+        cal_done = true;
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return fail_msg("ADC offset calibration did not complete");
+    if (!cal_done) {
+      return fail_msg("ADC offset calibration did not complete");
+    }
+
+    // Hardware averaging. Written after the reset (which clears OSR_CFG) and read
+    // back so a bus glitch can't silently leave averaging off.
+    const uint8_t osr = static_cast<uint8_t>(osr_code & kOsrMask);
+    if (!write_reg(kRegOsrCfg, osr)) {
+      return false;
+    }
+    uint8_t readback = 0;
+    if (!read_reg(kRegOsrCfg, readback)) {
+      return false;
+    }
+    if ((readback & kOsrMask) != osr) {
+      return fail_msg("OSR_CFG readback mismatch");
+    }
+    return true;
   }
 
   bool write_reg(uint8_t reg, uint8_t value)

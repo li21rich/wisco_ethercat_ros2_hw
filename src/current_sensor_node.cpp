@@ -36,23 +36,26 @@ namespace
 // The ADS7128 uses AVDD as its reference, and AVDD is the shared 3.3 V sensor rail.
 constexpr double kAdcRefVolts = 3.3;
 
-// ACS758 (bidirectional) sensitivity. The datasheet figure (13.3 mV/A for the
-// 150B; the team's 13.2) is quoted at VCC = 5 V, and the output is ratiometric to
-// VCC: sensitivity and zero both scale with the sensor's supply. On the 3.3 V
-// sensor rail that is 13.2 * 3.3 / 5.0 = 8.71 mV/A; using 13.2 there reads 34% low.
-// The node scales it by the sensor_supply_v parameter (default: the ADC rail).
-constexpr double kSensitivityMvPerAAt5V = 13.2;
+// ACS758 (bidirectional) sensitivity, as specified by the team.
+// NOTE: the datasheet sensitivity is ratiometric to VCC and quoted at 5 V.
+// If this value is the 5 V figure, the 3.3 V-rail equivalent is
+// 13.2 * 3.3 / 5.0 = ~8.71 mV/A. See the accompanying notes.
+constexpr double kSensitivityMvPerA = 13.2;
+
+// Counts are always in 12-bit units (the driver scales the 16-bit averaged result).
+constexpr double kAmpsPerCount =
+  (kAdcRefVolts / Ads7128::kFullScaleCounts) * 1000.0 / kSensitivityMvPerA;
 
 struct SensorChannel
 {
   const char * name;     // printed label (PLACEHOLDER net names, edit to match the PDB)
   uint8_t adc_channel;   // ADS7128 input index: AIN<adc_channel>
-  double zero_counts;    // hardcoded zero-current offset, in ADC counts
+  double zero_counts;    // hardcoded zero-current offset, in 12-bit ADC counts
 };
 
 // Ideal zero-current code is 2048 (VCC/2 on both the sensor and the ADC reference).
 // Replace each with the value printed by this node (print_raw_counts:=true) with
-// the rails unloaded.
+// the rails unloaded. With oversampling on, these can carry a fractional part.
 constexpr SensorChannel kSensors[] = {
   {"Main_curr", 0, 2048.0},        // main branch, after bulk capacitors
   {"Buck24_curr", 1, 2048.0},      // after 24 V buck, before the compute rails
@@ -68,15 +71,15 @@ constexpr SensorChannel kSensors[] = {
 /// Polls the ACS758 current sensors through an ADS7128 on I2C and printf()s amperes.
 ///
 /// Parameters:
-///   i2c_device       (string, "/dev/i2c-1")  i2c-dev node the ADC is on
-///   i2c_address      (int,    16)            7-bit address (0x10 = ADDR pin unconnected)
-///   poll_period_ms   (int,    100)           time between sweeps of all 7 channels
-///   print_raw_counts (bool,   false)         also print the raw ADC code per channel
-///   sensor_supply_v  (double, 3.3)           ACS758 VCC; its sensitivity is ratiometric
-///   sensitivity_mv_per_a_at_5v (double, 13.2) datasheet sensitivity at VCC = 5 V
+///   i2c_device         (string, "/dev/i2c-1")  i2c-dev node the ADC is on
+///   i2c_address        (int,    16)            7-bit address (0x10 = ADDR pin unconnected)
+///   poll_period_ms     (int,    100)           time between sweeps of all 7 channels
+///   oversampling_ratio (int,    16)            ADC hardware averaging (OSR_CFG):
+///                                              1 = off, or 2/4/8/16/32/64/128 samples
+///   print_raw_counts   (bool,   false)         also print the raw ADC code per channel
 ///
-/// Raw single-conversion samples only: there is deliberately no averaging or
-/// filtering, in software or in the ADC.
+/// Each reading is one hardware-averaged result from the ADC's OSR filter;
+/// there is no additional filtering in software.
 class CurrentSensorNode : public rclcpp::Node
 {
 public:
@@ -86,6 +89,7 @@ public:
     const auto i2c_device = this->declare_parameter<std::string>("i2c_device", "/dev/i2c-1");
     const auto i2c_address = this->declare_parameter<int64_t>("i2c_address", 0x10);
     const auto poll_period_ms = this->declare_parameter<int64_t>("poll_period_ms", 100);
+    const auto oversampling = this->declare_parameter<int64_t>("oversampling_ratio", 16);
     print_raw_ = this->declare_parameter<bool>("print_raw_counts", false);
     const double supply_v = this->declare_parameter<double>("sensor_supply_v", kAdcRefVolts);
     const double mv_per_a_5v =
@@ -102,15 +106,25 @@ public:
     if (poll_period_ms < 1) {
       throw std::invalid_argument("poll_period_ms must be >= 1");
     }
+    uint8_t osr_code = 0;
+    if (oversampling > 128 ||
+      !Ads7128::osr_code_for_ratio(static_cast<int>(oversampling), osr_code))
+    {
+      throw std::invalid_argument(
+              "oversampling_ratio must be 1, 2, 4, 8, 16, 32, 64 or 128");
+    }
 
-    if (!adc_.open(i2c_device, static_cast<uint8_t>(i2c_address))) {
+    if (!adc_.open(i2c_device, static_cast<uint8_t>(i2c_address),
+      static_cast<int>(oversampling)))
+    {
       throw std::runtime_error("ADS7128 init failed on " + i2c_device + ": " + adc_.last_error());
     }
 
     RCLCPP_INFO(
-      this->get_logger(), "ADS7128 ready on %s @ 0x%02x, polling %zu sensors every %ld ms.",
-      i2c_device.c_str(), static_cast<unsigned>(i2c_address), sizeof(kSensors) / sizeof(kSensors[0]),
-      static_cast<long>(poll_period_ms));
+      this->get_logger(),
+      "ADS7128 ready on %s @ 0x%02x, %ldx oversampling, polling %zu sensors every %ld ms.",
+      i2c_device.c_str(), static_cast<unsigned>(i2c_address), static_cast<long>(oversampling),
+      sizeof(kSensors) / sizeof(kSensors[0]), static_cast<long>(poll_period_ms));
 
     timer_ = this->create_wall_timer(
       std::chrono::milliseconds(poll_period_ms), [this]() {poll();});
@@ -124,7 +138,7 @@ private:
     std::printf("[%9.3f]", t);
 
     for (const auto & sensor : kSensors) {
-      uint16_t counts = 0;
+      double counts = 0.0;
       if (!adc_.read_raw(sensor.adc_channel, counts)) {
         std::printf(" %s=ERR", sensor.name);
         RCLCPP_ERROR_THROTTLE(
@@ -132,9 +146,9 @@ private:
           sensor.name, static_cast<int>(sensor.adc_channel), adc_.last_error().c_str());
         continue;
       }
-      const double amps = (static_cast<double>(counts) - sensor.zero_counts) * amps_per_count_;
+      const double amps = (counts - sensor.zero_counts) * kAmpsPerCount;
       if (print_raw_) {
-        std::printf(" %s=%+8.3fA(%4u)", sensor.name, amps, static_cast<unsigned>(counts));
+        std::printf(" %s=%+8.3fA(%9.4f)", sensor.name, amps, counts);
       } else {
         std::printf(" %s=%+8.3fA", sensor.name, amps);
       }
