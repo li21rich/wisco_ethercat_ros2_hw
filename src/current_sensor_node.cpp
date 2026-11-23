@@ -36,15 +36,10 @@ namespace
 // The ADS7128 uses AVDD as its reference, and AVDD is the shared 3.3 V sensor rail.
 constexpr double kAdcRefVolts = 3.3;
 
-// ACS758 (bidirectional) sensitivity, as specified by the team.
-// NOTE: the datasheet sensitivity is ratiometric to VCC and quoted at 5 V.
-// If this value is the 5 V figure, the 3.3 V-rail equivalent is
-// 13.2 * 3.3 / 5.0 = ~8.71 mV/A. See the accompanying notes.
-constexpr double kSensitivityMvPerA = 13.2;
-
+// ACS758 (bidirectional) sensitivity quoted at VCC = 5 V (13.3 mV/A for the
+// 150B; 13.2 mV/A per the team spec). Scaled at runtime by sensor_supply_v / 5.0.
 // Counts are always in 12-bit units (the driver scales the 16-bit averaged result).
-constexpr double kAmpsPerCount =
-  (kAdcRefVolts / Ads7128::kFullScaleCounts) * 1000.0 / kSensitivityMvPerA;
+constexpr double kSensitivityMvPerAAt5V = 13.2;
 
 struct SensorChannel
 {
@@ -146,7 +141,7 @@ private:
           sensor.name, static_cast<int>(sensor.adc_channel), adc_.last_error().c_str());
         continue;
       }
-      const double amps = (counts - sensor.zero_counts) * kAmpsPerCount;
+      const double amps = (counts - sensor.zero_counts) * amps_per_count_;
       if (print_raw_) {
         std::printf(" %s=%+8.3fA(%9.4f)", sensor.name, amps, counts);
       } else {
