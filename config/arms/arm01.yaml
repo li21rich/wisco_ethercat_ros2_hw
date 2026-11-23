@@ -98,14 +98,14 @@ joints:
     gains: {kp: 30.0, kd: 1.0}
   - name: forearm_yaw         # J5, ROM -90..+90 deg
     bus_position: 4
-    model: x4_10
+    model: x4_36
     direction: 1
-    gear_ratio: 12.5  # datasheet
+    gear_ratio: 36  # datasheet
     counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
-    rated_current_a: 7.8  # datasheet rms; 0x6075 holds the drive value (read over SDO)
-    max_torque_nm: 2.5  # bring-up clamp (x4_10: datasheet rated 4.0 Nm, peak in the model table)
-    max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 238 rpm = 24.9 rad/s)
+    rated_current_a: 6.1  # datasheet rms; 0x6075 holds the drive value (read over SDO)
+    max_torque_nm: 6.0  # bring-up clamp (x4_36: datasheet rated 10.5 Nm, peak in the model table)
+    max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 83 rpm = 8.7 rad/s)
     gains: {kp: 20.0, kd: 0.6}
   - name: wrist_pitch         # J6, ROM -35..+35 deg
     bus_position: 5
