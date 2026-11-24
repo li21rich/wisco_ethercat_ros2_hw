@@ -407,8 +407,8 @@ def main(argv=None) -> int:
     p.add_argument('stage', choices=[s for s, _ in STAGES] + ['gravity-check', 'float', 'all', 'rig', 'status',
                                                                'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest', 'goto', 'goto-xyz', 'wave'])
     p.add_argument('paths', nargs='*', help='export: kind and files; goto: J1..J7 (deg); goto-xyz: X Y Z (m, base frame)')
-    p.add_argument('--swing-s', type=float, default=0.7, help='wave: seconds per side-to-side swing')
-    p.add_argument('--waves', type=int, default=2, help='wave: number of waves')
+    p.add_argument('--swing-s', type=float, default=0.6, help='wave: seconds per side-to-side swing')
+    p.add_argument('--waves', type=int, default=3, help='wave: number of waves')
     p.add_argument('--speed', type=float, default=None, help='goto, goto-xyz: peak joint speed, rad/s (default 0.25)')
     p.add_argument('--manual-shoulders', action='store_true', help='log externally measured J2 and J3 angles alongside telemetry')
     p.add_argument('--log-angles', metavar='CSV', help='telemetry: capture labeled poses from cyclic feedback')

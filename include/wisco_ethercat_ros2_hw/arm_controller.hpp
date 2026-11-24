@@ -51,6 +51,9 @@
 //                    default true) this side adds gravity and friction
 //                    compensation, so all zeros floats the arm; false sends the
 //                    effort as is (the Orin then compensates gravity itself).
+//                    Optional per joint (NaN = unset): position holds that joint
+//                    there with the config kp/kd on top of the effort; velocity
+//                    alone damps it toward that speed (config kd).
 //   ~/joint_state (out)    every cycle: position [rad], velocity [rad/s], effort
 //                    (measured torque, Nm), stamped with the controller time.
 //
@@ -213,6 +216,7 @@ private:
   std::vector<double> local_center_, local_bias_, local_jacobian_, local_lower_, local_upper_;
   bool holding_ = false;
   std::vector<double> q_hold_;
+  std::vector<double> kp_cfg_, kd_cfg_;   // config gains for ~/joint_torque holds
   // write_max_torque (parameter, default false): also claims <joint>/max_torque
   // (0x6072) and writes the command's torque clamp there, so the drive's CSP
   // loop cannot exceed it. Needs 0x6072 mapped as a command interface.

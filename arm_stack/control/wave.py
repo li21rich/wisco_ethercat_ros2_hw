@@ -47,7 +47,7 @@ def _line_clear(zones, a, b, steps=50):
     return all(clear_of_keep_out(zones, a + s * (b - a), margin=0.0) for s in np.linspace(0, 1, steps))
 
 
-def run(client, home, zones=(), waves=2, swing_s=0.7):
+def run(client, home, zones=(), waves=3, swing_s=0.6):
     """swing_s: seconds per side-to-side swing (2 x AMPLITUDE). Ends at home."""
     speed = 1.875 * 2 * AMPLITUDE / swing_s            # min-jerk: duration = 1.875 dist / peak
     left, right = UP.copy(), UP.copy()

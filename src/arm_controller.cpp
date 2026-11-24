@@ -94,6 +94,10 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   {
     return controller_interface::CallbackReturn::ERROR;
   }
+  kp_cfg_ = node->get_parameter("kp").as_double_array();
+  kd_cfg_ = node->get_parameter("kd").as_double_array();
+  if (kp_cfg_.size() != n) {kp_cfg_.assign(n, 0.0);}
+  if (kd_cfg_.size() != n) {kd_cfg_ = cfg_.kd_fallback;}
   for (size_t i = 0; i < n; ++i) {
     if (!(cfg_.max_torque[i] > 0) || !(cfg_.max_velocity[i] > 0) || !(cfg_.lower[i] < cfg_.upper[i])) {
       RCLCPP_ERROR(logger, "bad limits for joint '%s'", joints_[i].c_str());
@@ -374,8 +378,18 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
       law.mode = arm::kModeT;
       law.gravity_ff = torque_compensation_;
       law.friction_ff_gain = 1.0;
-      law.q.assign(n, std::numeric_limits<double>::quiet_NaN());
+      // optional per joint: position -> impedance hold there (config kp/kd),
+      // velocity -> damping toward it (config kd). NaN / absent = pure torque.
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      law.q.assign(n, nan);
       law.qd = law.kp = law.kd = law.torque_clamp = law.q;
+      if (!from_joint_state(*msg, msg->position, false, "position", law.q)) {return;}
+      if (!from_joint_state(*msg, msg->velocity, false, "velocity", law.qd)) {return;}
+      for (size_t i = 0; i < n; ++i) {
+        const bool hold = std::isfinite(law.q[i]);
+        if (hold) {law.kp[i] = kp_cfg_[i];}
+        if (hold || std::isfinite(law.qd[i])) {law.kd[i] = kd_cfg_[i];}
+      }
       c->received_ns = steady_now_ns();
       command_buffer_.writeFromNonRT(c);
     });
