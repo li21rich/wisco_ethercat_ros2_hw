@@ -90,6 +90,8 @@ class RosArmClient(ArmClient):
         self.node = rclpy.create_node(node_name)
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.pub = self.node.create_publisher(Float64MultiArray, '/%s/command' % controller, 10)
+        # one message per move: [max_speed, q[n]]; the controller plans and steps the path
+        self.goto_pub = self.node.create_publisher(Float64MultiArray, '/%s/goto' % controller, 10)
         self._lock = threading.Lock()
         self._state = None
         self._received_at = 0.0
@@ -183,6 +185,23 @@ class RosArmClient(ArmClient):
         msg.data = encode_command(cmd, self.n)
         self.pub.publish(msg)
         self._last_cmd = cmd
+
+    def goto(self, q_goal, max_speed: float) -> float:
+        """Send one goal; the controller runs a min-jerk path to it at 1 kHz and then
+        holds it. Returns the path duration (s), computed as the controller does."""
+        if not np.all((self.state().status & 0x6f) == 0x27):
+            raise RuntimeError('A drive is disabled or faulted; motion commands stopped.')
+        deadline = time.monotonic() + 2.0
+        while self.goto_pub.get_subscription_count() == 0:
+            if time.monotonic() > deadline:
+                raise RuntimeError('arm_controller has no ~/goto subscriber; rebuild and restart the launch')
+            time.sleep(0.02)
+        q_goal = np.asarray(q_goal, float)
+        msg = self._msg_type()
+        msg.data = [float(max_speed)] + q_goal.tolist()
+        q_from = self.state().q
+        self.goto_pub.publish(msg)
+        return max(0.5, 1.875 * float(np.max(np.abs(q_goal - q_from))) / max_speed)
 
     def step(self, seconds: float = 0.0) -> JointState:
         # wall-clock pacing; the RT loop runs on its own clock

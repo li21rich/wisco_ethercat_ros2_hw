@@ -158,6 +158,25 @@ def go_to_rest(arm, calibration, client) -> int:
         return 1
 
 
+def cmd_goto(args, arm, calibration, client):
+    """arm goto J1..J7 (deg) | arm goto-xyz X Y Z (m): move there and keep holding (no rest move)."""
+    from .control import goto
+    try:
+        vals = [float(v) for v in args.paths]
+    except ValueError:
+        print('goto: numbers only, got %s' % ' '.join(args.paths))
+        return 2
+    model = build_model(arm, calibration)
+    try:
+        if args.stage == 'goto':
+            plan = goto.plan_joints(model, arm.keep_out, vals)
+        else:
+            plan = goto.plan_xyz(model, arm.keep_out, vals, client.state().q)
+        return goto.run(model, arm.keep_out, client, plan, arm.names, speed=args.speed or goto.GOTO_SPEED)
+    finally:
+        client.close()
+
+
 def session_meta(arm, store, calibration, client, operator):
     return {
         'arm': arm.arm, 'joint_names': arm.names,
@@ -381,8 +400,9 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog='arm', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('stage', choices=[s for s, _ in STAGES] + ['gravity-check', 'float', 'all', 'rig', 'status',
-                                                               'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest'])
-    p.add_argument('paths', nargs='*', help='export: kind and files')
+                                                               'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest', 'goto', 'goto-xyz'])
+    p.add_argument('paths', nargs='*', help='export: kind and files; goto: J1..J7 (deg); goto-xyz: X Y Z (m, base frame)')
+    p.add_argument('--speed', type=float, default=None, help='goto, goto-xyz: peak joint speed, rad/s (default 0.25)')
     p.add_argument('--manual-shoulders', action='store_true', help='log externally measured J2 and J3 angles alongside telemetry')
     p.add_argument('--log-angles', metavar='CSV', help='telemetry: capture labeled poses from cyclic feedback')
     p.add_argument('--diagnose-encoders', action='store_true', help='telemetry: compare drive encoder registers with cyclic positions')
@@ -543,6 +563,8 @@ def main(argv=None) -> int:
     client = make_client(args, arm, calibration)
     if args.stage == 'rest':
         return cmd_rest(arm, calibration, client)
+    if args.stage in ('goto', 'goto-xyz'):
+        return cmd_goto(args, arm, calibration, client)
     recorder = None
     if not args.no_log or args.record is not None:
         from .log.recorder import Recorder, RecordingClient, SessionRejected

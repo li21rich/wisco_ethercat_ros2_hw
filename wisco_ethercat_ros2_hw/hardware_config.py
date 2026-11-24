@@ -410,6 +410,7 @@ class HardwareConfig:
             'torque_offset_enabled': [j.supports_torque_offset for j in self.joints],
             # planned velocity into 0x60B1 in CSP (0: off); joints without 0x1603 get none
             'velocity_ff_gain': float(arm_config.get('velocity_ff_gain', 1.0)),
+            'velocity_ff_tau_s': float(arm_config.get('velocity_ff_tau_s', 0.02)),
             'coulomb_ff_nm': [j.coulomb_ff_nm for j in self.joints],
             'calibration_file': calibration_file or '',
         }

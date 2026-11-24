@@ -49,6 +49,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<bool>("write_max_torque", false);
     auto_declare<std::vector<bool>>("torque_offset_enabled", std::vector<bool>{});
     auto_declare<double>("velocity_ff_gain", 1.0);
+    auto_declare<double>("velocity_ff_tau_s", 0.02);
     auto_declare<std::vector<double>>("coulomb_ff_nm", std::vector<double>{});
     auto_declare<std::string>("calibration_file", "");
     auto_declare<std::string>("robot_description", "");
@@ -178,9 +179,16 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
   }
   write_max_torque_ = node->get_parameter("write_max_torque").as_bool();
   torque_offset_enabled_ = node->get_parameter("torque_offset_enabled").as_bool_array();
+  auto gain_ok = [](double g) {return std::isfinite(g) && g >= 0.0 && g <= 1.5;};
+  auto tau_ok = [](double t) {return std::isfinite(t) && t >= 0.0 && t <= 0.2;};
   velocity_ff_gain_ = node->get_parameter("velocity_ff_gain").as_double();
-  if (!std::isfinite(velocity_ff_gain_) || velocity_ff_gain_ < 0.0 || velocity_ff_gain_ > 1.5) {
-    RCLCPP_ERROR(logger, "'velocity_ff_gain' must be in [0, 1.5], got %f", velocity_ff_gain_);
+  if (!gain_ok(velocity_ff_gain_)) {
+    RCLCPP_ERROR(logger, "'velocity_ff_gain' must be in [0, 1.5], got %f", velocity_ff_gain_.load());
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  velocity_ff_tau_s_ = node->get_parameter("velocity_ff_tau_s").as_double();
+  if (!tau_ok(velocity_ff_tau_s_)) {
+    RCLCPP_ERROR(logger, "'velocity_ff_tau_s' must be in [0, 0.2] s, got %f", velocity_ff_tau_s_.load());
     return controller_interface::CallbackReturn::ERROR;
   }
   vff_.assign(n, 0.0);
@@ -198,10 +206,20 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     coulomb_ff_ = std::make_unique<std::atomic<double>[]>(n);
     for (size_t i = 0; i < n; ++i) {coulomb_ff_[i] = c.empty() ? 0.0 : c[i];}
     coulomb_cb_ = node->add_on_set_parameters_callback(
-      [this, n, valid](const std::vector<rclcpp::Parameter> & ps) {
+      [this, n, valid, gain_ok, tau_ok](const std::vector<rclcpp::Parameter> & ps) {
         rcl_interfaces::msg::SetParametersResult r;
         r.successful = true;
         for (const auto & p : ps) {
+          if (p.get_name() == "velocity_ff_gain") {
+            if (!gain_ok(p.as_double())) {r.successful = false; r.reason = "velocity_ff_gain: [0, 1.5]"; return r;}
+            velocity_ff_gain_ = p.as_double();
+            continue;
+          }
+          if (p.get_name() == "velocity_ff_tau_s") {
+            if (!tau_ok(p.as_double())) {r.successful = false; r.reason = "velocity_ff_tau_s: [0, 0.2] s"; return r;}
+            velocity_ff_tau_s_ = p.as_double();
+            continue;
+          }
           if (p.get_name() != "coulomb_ff_nm") {continue;}
           const auto v = p.as_double_array();
           if (!valid(v)) {r.successful = false; r.reason = "coulomb_ff_nm: n entries in [0, 2] Nm"; return r;}
@@ -308,6 +326,39 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
       c->received_ns = steady_now_ns();
       command_buffer_.writeFromNonRT(c);
     });
+  goto_q0_.assign(n, 0.0);
+  goto_law_ = arm::LawCommand();
+  goto_law_.present = true;
+  goto_law_.age_s = 0.0;
+  goto_law_.mode = arm::kModeP;
+  goto_law_.q.assign(n, 0.0);
+  goto_law_.qd.assign(n, 0.0);
+  for (auto * v : {&goto_law_.kp, &goto_law_.kd, &goto_law_.tau_ff, &goto_law_.torque_clamp}) {
+    v->assign(n, std::numeric_limits<double>::quiet_NaN());
+  }
+  goto_sub_ = node->create_subscription<std_msgs::msg::Float64MultiArray>(
+    "~/goto", rclcpp::SystemDefaultsQoS(),
+    [this, n](const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+      const auto & d = msg->data;
+      const auto log = get_node()->get_logger();
+      if (hold_only_) {
+        RCLCPP_WARN(log, "Ignoring goto: relative reference permits position holding only");
+        return;
+      }
+      if (d.size() != n + 1 || !std::isfinite(d[0]) || d[0] <= 0.0 ||
+        !std::all_of(d.begin() + 1, d.end(), [](double v) {return std::isfinite(v);}))
+      {
+        RCLCPP_WARN(log, "ignoring goto: need [max_speed > 0, q[%zu]] all finite, got %zu values",
+          n, d.size());
+        return;
+      }
+      auto g = std::make_shared<Goto>();
+      g->max_speed = d[0];
+      for (size_t i = 0; i < n; ++i) {g->max_speed = std::min(g->max_speed, cfg_.max_velocity[i]);}
+      g->q.assign(d.begin() + 1, d.end());
+      g->received_ns = steady_now_ns();
+      goto_buffer_.writeFromNonRT(g);
+    });
   state_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
     "~/state", rclcpp::SystemDefaultsQoS());
   rt_state_ = std::make_unique<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>>(
@@ -396,6 +447,9 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
   // Start held in CSP at the actual position; no command -> watchdog fallback
   // next cycle (gravity comp + damping) until Python sends targets.
   command_buffer_.writeFromNonRT(std::shared_ptr<Command>());
+  goto_buffer_.writeFromNonRT(std::shared_ptr<Goto>());
+  goto_ns_ = 0;
+  goto_cancelled_ns_ = 0;
   for (size_t i = 0; i < joints_.size(); ++i) {
     q_target_prev_[i] = st_pos_[i].get().get_value();
     cmd_pos_[i].get().set_value(q_target_prev_[i]);
@@ -430,6 +484,7 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
     cmd_mode_[i].get().set_value(static_cast<double>(arm::kCsp));
   }
   command_buffer_.writeFromNonRT(std::shared_ptr<Command>());
+  goto_buffer_.writeFromNonRT(std::shared_ptr<Goto>());
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -490,7 +545,41 @@ controller_interface::return_type ArmController::update(
       }
     }
   } else if (gravity_enabled_) {gravity_->gravity(q_, g_);} else {std::fill(g_.begin(), g_.end(), 0.0);}
-  arm::compute(cfg_, cmd && all_enabled ? cmd->law : kNone, q_, qd_, g_, out_);
+  // A goto newer than the last streamed command runs the min-jerk path here, one
+  // step per control period, and then keeps holding its goal.
+  const arm::LawCommand * law = cmd ? &cmd->law : nullptr;
+  const std::shared_ptr<Goto> go = *goto_buffer_.readFromRT();
+  if (go && go->received_ns != goto_cancelled_ns_ && (!cmd || go->received_ns > cmd->received_ns)) {
+    if (!all_enabled) {
+      goto_cancelled_ns_ = go->received_ns;   // a drive dropped out: do not resume a stale path
+      goto_ns_ = 0;
+    } else {
+      if (go->received_ns != goto_ns_) {
+        goto_ns_ = go->received_ns;
+        goto_t_ = 0.0;
+        double dist = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+          // from the last CSP target (continuous), or the actual angle out of Mode T
+          goto_q0_[i] = last_mode_ == arm::kModeP && !holding_ ? q_target_prev_[i] : q_[i];
+          if (holding_) {goto_q0_[i] = q_hold_[i];}
+          dist = std::max(dist, std::fabs(go->q[i] - goto_q0_[i]));
+        }
+        goto_T_ = std::max(0.5, 1.875 * dist / go->max_speed);
+      } else {
+        goto_t_ += dt;
+      }
+      const double s = std::clamp(goto_t_ / goto_T_, 0.0, 1.0);
+      const double p = s * s * s * (10.0 - 15.0 * s + 6.0 * s * s);
+      const double v = 30.0 * s * s * (1.0 - s) * (1.0 - s) / goto_T_;
+      for (size_t i = 0; i < n; ++i) {
+        const double span = go->q[i] - goto_q0_[i];
+        goto_law_.q[i] = goto_q0_[i] + p * span;
+        goto_law_.qd[i] = v * span;
+      }
+      law = &goto_law_;
+    }
+  }
+  arm::compute(cfg_, law && all_enabled ? *law : kNone, q_, qd_, g_, out_);
   const bool hold = out_.fallback && (hold_on_timeout_ || (hold_on_startup_ && !cmd));
   if (hold) {
     if (!holding_ || ((hold_only_ || position_only_) && !all_enabled)) {q_hold_ = q_;}
@@ -555,9 +644,9 @@ controller_interface::return_type ArmController::update(
       const double goal =
         arm::ease_in(q_switch_[i], out_.q_target[i], since_ease_[i], blend_s_);
       target = arm::rate_limit(q_target_prev_[i], goal, cfg_.max_velocity[i] * dt);
-      const double alpha = dt / (dt + 0.02);
+      const double alpha = dt / (dt + velocity_ff_tau_s_.load(std::memory_order_relaxed));
       vff_[i] += alpha * ((target - q_target_prev_[i]) / dt - vff_[i]);
-      vff = std::clamp(velocity_ff_gain_ * vff_[i], -cfg_.max_velocity[i], cfg_.max_velocity[i]);
+      vff = std::clamp(velocity_ff_gain_.load(std::memory_order_relaxed) * vff_[i], -cfg_.max_velocity[i], cfg_.max_velocity[i]);
       q_target_prev_[i] = target;
     } else {
       vff_[i] = 0.0;
@@ -577,10 +666,10 @@ controller_interface::return_type ArmController::update(
     cmd_mode_[i].get().set_value(static_cast<double>(requested));
     cmd_pos_[i].get().set_value(target);
     double cap = cfg_.max_torque[i];
-    if (cmd && !out_.fallback && i < cmd->law.torque_clamp.size() &&
-      std::isfinite(cmd->law.torque_clamp[i]))
+    if (law && !out_.fallback && i < law->torque_clamp.size() &&
+      std::isfinite(law->torque_clamp[i]))
     {
-      cap = std::min(cap, std::fabs(cmd->law.torque_clamp[i]));
+      cap = std::min(cap, std::fabs(law->torque_clamp[i]));
     }
     if (write_max_torque_) {
       // 0x6072 also caps the drive's own CSP position loop, e.g. during a

@@ -19,6 +19,13 @@
 //                    kg <= 0 clears it, NaN kg leaves it. Commands without the
 //                    block (the original length) leave it as it is. Reset to
 //                    none on activation.
+//   ~/goto (in)      [max_speed (rad/s), q[n]]: one message per move. The controller
+//                    plans a min-jerk path from its current CSP target to q (duration
+//                    max(0.5 s, 1.875 * max|dq| / max_speed)) and steps it every cycle
+//                    in Mode P with gravity feedforward, through the same law (soft
+//                    limits, keep-out, rate limit). At the end it keeps holding q. A
+//                    ~/command received after the goto takes over; a drive leaving
+//                    OPERATION_ENABLED cancels it. Smooth whatever the network does.
 //   ~/state (out)    [t (s, steady), mode, fallback, limit_hit, clamped,
 //                     q[n], qd[n], tau_measured[n], tau_out[n], q_target[n]]
 //                    every cycle, through a realtime publisher (try-lock; the
@@ -103,6 +110,12 @@ private:
     bool has_payload = false;          // the optional payload block was sent
     double payload[kPayloadBlock] = {0.0, 0.0, 0.0, 0.0};
   };
+  struct Goto
+  {
+    double max_speed = 0.0;
+    std::vector<double> q;
+    int64_t received_ns = 0;
+  };
   using Ref = std::reference_wrapper<hardware_interface::LoanedCommandInterface>;
   using StateRef = std::reference_wrapper<hardware_interface::LoanedStateInterface>;
 
@@ -114,6 +127,14 @@ private:
   double blend_s_ = 0.02;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<Command>> command_buffer_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<Goto>> goto_buffer_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr goto_sub_;
+  // goto in progress (RT thread only)
+  int64_t goto_ns_ = 0;              // received_ns of the goto being run (0: none)
+  int64_t goto_cancelled_ns_ = 0;    // a goto cancelled by a drive dropping out
+  double goto_t_ = 0.0, goto_T_ = 0.0;
+  std::vector<double> goto_q0_;
+  arm::LawCommand goto_law_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr subscription_;
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> state_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>> rt_state_;
@@ -124,7 +145,9 @@ private:
   // 0x60B1 velocity offset (CSP feedforward), on the joints with torque_offset
   std::vector<hardware_interface::LoanedCommandInterface *> cmd_voff_;
   std::vector<double> vff_;          // low-passed velocity of the CSP target (rad/s)
-  double velocity_ff_gain_ = 1.0;
+  // runtime-settable (parameters velocity_ff_gain, velocity_ff_tau_s) for tuning
+  std::atomic<double> velocity_ff_gain_{1.0};
+  std::atomic<double> velocity_ff_tau_s_{0.02};   // low-pass of the target velocity
   // Coulomb friction feedforward into 0x60B2 in CSP (Nm, per joint), signed by the
   // target velocity. Settable at runtime (parameter coulomb_ff_nm) for tuning.
   std::unique_ptr<std::atomic<double>[]> coulomb_ff_;
