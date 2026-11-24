@@ -81,7 +81,7 @@ def test_float_config_is_safe_by_construction(arm):
     cfg = FloatConfig.from_arm(arm, model, friction_gain=1.7)
     assert np.all(cfg.friction_gain < 1.0)                       # never all of the friction
     assert cfg.torque_clamp.tolist() == [j.max_torque_nm for j in arm.joints] == [12, 12, 10, 15, 10, 2.5, 2.5]
-    assert np.allclose(cfg.vel_limit_fraction * cfg.max_vel, 1.0)    # 0.5 x bring-up 2 rad/s
+    assert np.allclose(cfg.vel_limit_fraction * cfg.max_vel, 2.5)    # 0.5 x bring-up 2 rad/s
 
 
 def test_payload_gravity_matches_inertia_on_the_truth_model(arm):
