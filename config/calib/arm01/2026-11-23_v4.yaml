@@ -1,0 +1,171 @@
+# Written by `arm stop_zero_cad_align`. Never edit by hand; rerun the stage.
+version: 4
+arm_serial: arm01
+date: '2026-11-23'
+git_sha: cac0918
+joint_config_hash: 881a91321057811d
+stage: stop_zero_cad_align
+zero_offsets_rad:
+  shoulder_pitch: -0.3911448056661313
+  shoulder_roll: -0.19537891256466178
+  shoulder_yaw: 0.3953985330512544
+  elbow: -1.31034957373926
+  forearm_yaw: 0.8052100431993218
+  wrist_pitch: 0.04676619716388497
+  wrist_yaw: -0.28062036465783047
+soft_limits_rad:
+  shoulder_pitch:
+  - -1.5707963267948966
+  - 3.141592653589793
+  shoulder_roll:
+  - 0.04568475822017991
+  - 3.3161255787892263
+  shoulder_yaw:
+  - -1.5707963267948966
+  - 1.5707963267948966
+  elbow:
+  - 0.0
+  - 2.2689280275926285
+  forearm_yaw:
+  - -1.5707963267948966
+  - 1.5707963267948966
+  wrist_pitch:
+  - -0.5645438352514888
+  - 0.563649499442125
+  wrist_yaw:
+  - -1.5707963267948966
+  - 1.5707963267948966
+kt_output_nm_per_a:
+  shoulder_pitch: null
+  shoulder_roll: null
+  shoulder_yaw: null
+  elbow: null
+  forearm_yaw: null
+  wrist_pitch: null
+  wrist_yaw: null
+link_inertials: null
+friction: null
+latency_ms: null
+joint_stiffness_nm_per_rad: null
+kinematic_overlay: null
+pace: null
+validation: null
+coordinate_frame: urdf
+local_gravity: null
+gravity_validation: null
+commissioning:
+  method: powered_stop_zero
+  verified: false
+  encoder_reference: mechanical_stops_on_cad
+  rough_reference:
+    pose_rad:
+    - 1.5708
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    counts:
+    - 24608.5
+    - -2045.75
+    - -48345.0
+    - 39519.0
+    - 10931.0
+    - 27304.0
+    - -33697.0
+    tolerance_deg: 10.0
+    joints_left_on_it:
+    - shoulder_pitch
+  references:
+    shoulder_roll:
+      lower:
+        stop_rad: -3.1166534815617464
+        rough_angles_rad:
+        - -3.1166295131119357
+        - -3.116677450011557
+      upper:
+        stop_rad: 0.3001209443048446
+        rough_angles_rad:
+        - 0.29997713360598033
+        - 0.3002647550037089
+      travel_rad: 3.416774425866591
+      center_rad: -1.4082662686284508
+    shoulder_yaw:
+      lower:
+        stop_rad: -0.12493554463834222
+        rough_angles_rad:
+        - -0.1250194342126798
+        - -0.12485165506400464
+      upper:
+        stop_rad: 3.23273268399503
+        rough_angles_rad:
+        - 3.232768636669746
+        - 3.232696731320314
+      travel_rad: 3.357668228633372
+      center_rad: 1.5538985696783438
+    elbow:
+      lower:
+        stop_rad: -2.0235363752694573
+        rough_angles_rad:
+        - -2.022793353325325
+        - -2.024279397213589
+      upper:
+        stop_rad: 0.48225719441645387
+        rough_angles_rad:
+        - 0.48243695779003426
+        - 0.4820774310428735
+      travel_rad: 2.505793569685911
+      center_rad: -0.7706395904265018
+    forearm_yaw:
+      lower:
+        stop_rad: -1.1367876218474082
+        rough_angles_rad:
+        - -1.1367037322730709
+        - -1.1368715114217458
+      upper:
+        stop_rad: 2.223217530642508
+        rough_angles_rad:
+        - 2.223313404441751
+        - 2.2231216568432655
+      travel_rad: 3.3600051524899164
+      center_rad: 0.54321495439755
+    wrist_pitch:
+      lower:
+        stop_rad: -1.2245720692791453
+        rough_angles_rad:
+        - -1.2244761954799024
+        - -1.224667943078388
+      upper:
+        stop_rad: 0.008341020534128163
+        rough_angles_rad:
+        - 0.0082451467348853
+        - 0.008436894333371026
+      travel_rad: 1.2329130898132734
+      center_rad: -0.6081155243725086
+    wrist_yaw:
+      lower:
+        stop_rad: -1.2293657592412877
+        rough_angles_rad:
+        - -1.2284789265982914
+        - -1.230252591884284
+      upper:
+        stop_rad: 2.283030797145143
+        rough_angles_rad:
+        - 2.2827551599723197
+        - 2.283306434317966
+      travel_rad: 3.5123965563864306
+      center_rad: 0.5268325189519276
+  direction_and_scale: configured; roll/elbow from gravity vs range (2026-11-23)
+  mechanical_stops_measured: true
+  range_kind: both_stops_per_joint
+  relative_motion: false
+  local_checks_passed: false
+  directions:
+    shoulder_pitch: 1
+    shoulder_roll: -1
+    shoulder_yaw: 1
+    elbow: -1
+    forearm_yaw: 1
+    wrist_pitch: 1
+    wrist_yaw: 1

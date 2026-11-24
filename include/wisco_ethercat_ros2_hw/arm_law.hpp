@@ -28,6 +28,48 @@ enum Mode : int { kModeP = 0, kModeT = 1 };
 constexpr int kCsp = 8;
 constexpr int kCst = 10;
 
+// Self-collision keep-out between two joints: while `gate` is below `gate_min`,
+// `joint` must stay within [lower, upper] (arm01: the upper arm hits the shoulder
+// plate when J1 swings far with J2 rolled in).
+struct KeepOut
+{
+  size_t joint = 0;
+  size_t gate = 0;
+  double lower = 0.0;
+  double upper = 0.0;
+  double gate_min = 0.0;
+};
+
+// How far outside its band the joint must be before the keep-out treats it as out
+// (so tracking error at the band edge cannot flip which joint gets clamped).
+constexpr double kKeepOutTolerance = 0.035;  // rad, 2 deg
+
+// Projects the target out of each keep-out zone. The measured state picks the side:
+// with the joint already out of its band, the gate is held at gate_min; otherwise the
+// joint is held inside its band until the gate is past gate_min. Returns true if any
+// target changed.
+inline bool apply_keep_out(
+  const std::vector<KeepOut> & zones, const std::vector<double> & q, std::vector<double> & q_d)
+{
+  bool hit = false;
+  for (const KeepOut & z : zones) {
+    if (z.joint >= q.size() || z.gate >= q.size() || z.joint >= q_d.size() || z.gate >= q_d.size()) {
+      continue;
+    }
+    const bool target_out = q_d[z.joint] < z.lower || q_d[z.joint] > z.upper;
+    if (!target_out || q_d[z.gate] >= z.gate_min) {continue;}
+    hit = true;
+    const bool joint_out = q[z.joint] < z.lower - kKeepOutTolerance ||
+      q[z.joint] > z.upper + kKeepOutTolerance;
+    if (joint_out) {
+      q_d[z.gate] = z.gate_min;
+    } else {
+      q_d[z.joint] = std::clamp(q_d[z.joint], z.lower, z.upper);
+    }
+  }
+  return hit;
+}
+
 struct LawConfig
 {
   std::vector<double> max_torque;    // Nm, per joint
@@ -39,6 +81,7 @@ struct LawConfig
   std::vector<double> viscous;       // Nm s/rad
   double soft_margin = 0.05;         // rad, sets the soft-limit spring
   double watchdog_s = 0.05;
+  std::vector<KeepOut> keep_out;     // enforced even with ignore_soft_limits
 };
 
 struct LawCommand
@@ -113,15 +156,23 @@ inline void compute(
   }
 
   const double limit_k_scale = 4.0 / std::max(c.soft_margin, 1e-3);
+  // per-joint soft limits first, then the keep-outs on the clamped targets
   for (size_t i = 0; i < n; ++i) {
     double q_d = (i < cmd.q.size() && std::isfinite(cmd.q[i])) ? cmd.q[i] : q[i];
-    double qd_d = or_zero(cmd.qd, i);
+    if (q_d < c.lower[i] || q_d > c.upper[i]) {out.limit_hit = true;}
+    if (!cmd.ignore_soft_limits) {q_d = std::clamp(q_d, c.lower[i], c.upper[i]);}
+    out.q_target[i] = q_d;
+    out.tau[i] = q_d;   // scratch (overwritten below): the target before the keep-outs
+  }
+  if (apply_keep_out(c.keep_out, q, out.q_target)) {out.limit_hit = true;}
+  for (size_t i = 0; i < n; ++i) {
+    const double q_d = out.q_target[i];
+    // a target the keep-out moved is held there: no velocity toward the zone
+    double qd_d = (q_d != out.tau[i]) ? 0.0 : or_zero(cmd.qd, i);
     const double ff_v = (cmd.mode == kModeP) ? qd_d : qd[i];
     const double ff = cmd.gravity_ff ? g[i] + cmd.friction_ff_gain * friction(c, i, ff_v) : 0.0;
     const double tau_ff = or_zero(cmd.tau_ff, i);
 
-    if (q_d < c.lower[i] || q_d > c.upper[i]) {out.limit_hit = true;}
-    if (!cmd.ignore_soft_limits) {q_d = std::clamp(q_d, c.lower[i], c.upper[i]);}
     qd_d = std::clamp(qd_d, -c.max_velocity[i], c.max_velocity[i]);
 
     if (cmd.mode == kModeP) {

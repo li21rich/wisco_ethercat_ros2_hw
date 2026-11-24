@@ -178,7 +178,8 @@ class SimArm(ArmClient):
                 upper[i] = hi
         self.law = ControlLaw(self.model, [j.max_torque_nm for j in self.arm.joints],
                               [j.max_vel_rad_s for j in self.arm.joints], lower, upper,
-                              kd_fallback=[max(j.kd, 0.2) for j in self.arm.joints])
+                              kd_fallback=[max(j.kd, 0.2) for j in self.arm.joints],
+                              keep_out=self.arm.keep_out)
 
     # ------------------------------------------------------------------ sensors
     def _encoder_counts(self) -> np.ndarray:

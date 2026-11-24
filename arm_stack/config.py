@@ -10,6 +10,7 @@ values.
 from __future__ import annotations
 
 import copy
+import math
 import datetime as _dt
 import hashlib
 import os
@@ -110,6 +111,23 @@ class ArmConfig:
 
     def hash(self) -> str:
         return file_hash(self.path)
+
+    @property
+    def keep_out(self):
+        """`keep_out_deg` as (joint, gate, lower, upper, gate_min) tuples, indices and rad
+        (see arm_stack/control/law.py apply_keep_out)."""
+        zones = []
+        for z in self.raw.get('keep_out_deg') or []:
+            names = self.names
+            for key in ('joint', 'gate'):
+                if z.get(key) not in names:
+                    raise ValueError('keep_out_deg: unknown %s %r' % (key, z.get(key)))
+            lo, hi = math.radians(float(z['lower'])), math.radians(float(z['upper']))
+            if not lo < hi or z['joint'] == z['gate']:
+                raise ValueError('keep_out_deg: bad zone %r' % (z,))
+            zones.append((names.index(z['joint']), names.index(z['gate']), lo, hi,
+                          math.radians(float(z['gate_min']))))
+        return zones
 
     @property
     def home(self) -> Optional[np.ndarray]:

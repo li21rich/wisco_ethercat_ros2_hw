@@ -76,6 +76,27 @@ def random_poses(model: ArmModel, count: int, rng, margin=10 * DEG, spread=1.0) 
     return rng.uniform(mid - half, mid + half, (count, model.n))
 
 
+def clear_of_keep_out(zones, q, margin=5 * DEG) -> bool:
+    """True if q is at least `margin` away from every keep-out zone (ArmConfig.keep_out),
+    so a pose the control law would hold short is never chosen as a measurement pose."""
+    for joint, gate, lower, upper, gate_min in zones:
+        if q[gate] < gate_min + margin and not (lower + margin <= q[joint] <= upper - margin):
+            return False
+    return True
+
+
+def poses_clear_of_keep_out(model: ArmModel, count: int, rng, zones, tries: int = 200, **kw) -> np.ndarray:
+    """random_poses, redrawing any that fall in a keep-out zone."""
+    out = []
+    for _ in range(count * tries):
+        q = random_poses(model, 1, rng, **kw)[0]
+        if clear_of_keep_out(zones, q):
+            out.append(q)
+            if len(out) == count:
+                return np.array(out)
+    raise RuntimeError('could not draw %d poses clear of the keep-out zones' % count)
+
+
 def r_squared(y, yhat) -> float:
     y = np.asarray(y)
     ss_res = np.sum((y - yhat) ** 2)

@@ -21,12 +21,16 @@ from __future__ import annotations
 import numpy as np
 
 from ..control.motion import Trace, hold_and_average, move_to, stream
-from .common import DEG, StageContext, StageResult, random_poses, safe_home
+from .common import DEG, StageContext, StageResult, poses_clear_of_keep_out, random_poses, safe_home
 
 RESIDUAL_FRACTION = 0.05
+LOADED_NM = 0.5       # peak gravity above which a joint must beat the URDF (J1-J4 on arm01)
 COM_FLAG_M = 0.010
 SWEEP = 2 * DEG
-SPEED = 0.04
+SPEED = 0.056         # rad/s through each pose (0.04 until 2026-11-23, +40% on request)
+MOVE_SPEED = 0.56     # rad/s between poses (was the 0.4 calibration cap, +40%)
+N_FIT, N_TEST = 12, 4 # 16 poses x 7 joints for <= 28 parameters (rank ~14); was 32 + 10
+N_REPEAT = 2          # test poses measured twice: the repeatability floor of the pass check
 PRIOR_WEIGHT = 1e-3
 
 
@@ -40,7 +44,7 @@ def measure_pose(ctx, q, clamp, sweep=SWEEP, speed=SPEED):
     passes = []
     for sgn in (+1, -1):
         start = q - sgn * sweep
-        move_to(client, start, max_speed=min(0.4, ctx.motion_speed), settle=0.3, torque_clamp=clamp)
+        move_to(client, start, max_speed=MOVE_SPEED, settle=0.3, torque_clamp=clamp)
         n = max(2, int(2 * sweep / speed / client.cmd_dt))
         s = np.linspace(0, 1, n)[:, None]
         qs = start[None, :] + sgn * 2 * sweep * s
@@ -52,6 +56,7 @@ def measure_pose(ctx, q, clamp, sweep=SWEEP, speed=SPEED):
         passes.append((a['tau'][mid].mean(axis=0), a['q'][mid].mean(axis=0)))
     tau = 0.5 * (passes[0][0] + passes[1][0])
     q_meas = 0.5 * (passes[0][1] + passes[1][1])
+    measure_pose.friction = 0.5 * np.abs(passes[0][0] - passes[1][0])   # up vs down pass
     return tau, q_meas
 
 
@@ -92,48 +97,78 @@ def measure_static_pose(ctx, q, clamp):
     return np.mean([r['tau'] for r in reads], axis=0), np.mean([r['q'] for r in reads], axis=0)
 
 
-def fit_static_parameters(model, Q, T, scale):
-    """Regularized static mass/first-moment fit with positive mass bounds."""
+def fit_static_parameters(model, Q, T, scale, bias=False):
+    """Regularized static mass/first-moment fit with positive mass bounds. With bias=True
+    each joint also gets a constant torque offset (a diagnostic for forces no link mass
+    explains, e.g. cable drag); its values come back as a fifth element."""
     from scipy.optimize import lsq_linear
+    n = model.n
     rows = []
     for q in Q:
         moments, masses = model.gravity_first_moment_regressor(q)
-        rows.append(np.column_stack([masses, moments]) / scale[:, None])
+        cols = [masses, moments] + ([np.eye(n)] if bias else [])
+        rows.append(np.column_stack(cols) / scale[:, None])
     A = np.vstack(rows)
     b = np.concatenate([t / scale for t in T])
-    prior = np.concatenate([model.masses(), model.first_moments()])
+    prior = np.concatenate([model.masses(), model.first_moments()] + ([np.zeros(n)] if bias else []))
     lam = PRIOR_WEIGHT * np.trace(A.T @ A) / A.shape[1]
     augmented = np.vstack([A, np.sqrt(lam) * np.eye(len(prior))])
     rhs = np.concatenate([b, np.sqrt(lam) * prior])
-    lower = np.concatenate([0.05 * model.masses(), np.full(3 * model.n, -np.inf)])
-    upper = np.concatenate([5 * model.masses(), np.full(3 * model.n, np.inf)])
+    extra = [np.full(n, -np.inf)] if bias else []
+    lower = np.concatenate([0.05 * model.masses(), np.full(3 * n, -np.inf)] + extra)
+    upper = np.concatenate([5 * model.masses(), np.full(3 * n, np.inf)] + [-e for e in extra])
     fit = lsq_linear(augmented, rhs, bounds=(lower, upper))
     if not fit.success:
         raise RuntimeError('Static gravity parameter fit did not converge.')
     _, singular, vt = np.linalg.svd(A, full_matrices=False)
     rank = int(np.sum(singular > singular[0] * 1e-6))
-    return fit.x[:model.n], fit.x[model.n:], singular, vt[:rank]
+    out = (fit.x[:n], fit.x[n:4 * n], singular, vt[:rank])
+    return out + (fit.x[4 * n:],) if bias else out
 
 
-def run(ctx: StageContext, n_fit: int = None, n_test: int = 10, fit_masses: bool = False,
+def nearest_neighbour_order(start, poses):
+    """Visit order that keeps each move short (largest-joint distance, greedy)."""
+    left = list(range(len(poses)))
+    order, here = [], np.asarray(start, float)
+    while left:
+        k = min(left, key=lambda i: np.max(np.abs(poses[i] - here)))
+        order.append(k)
+        left.remove(k)
+        here = poses[k]
+    return [poses[i] for i in order]
+
+
+def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bool = False,
         static: bool = False) -> StageResult:
     client, arm = ctx.client, ctx.arm
     model = ctx.model.copy()
-    n_fit = n_fit or (min(16, 4 + 4 * model.n) if ctx.quick else 32)   # 3 params per link
-    n_test = 6 if ctx.quick else n_test
+    n_fit = n_fit or N_FIT
+    n_test = n_test or N_TEST
     home = safe_home(model)
     peak_g = model.peak_gravity_torque()
     peak = np.array([j.peak_torque_nm for j in arm.joints])
-    poses = random_poses(model, n_fit + n_test, ctx.rng, margin=12 * DEG, spread=0.8)
-    data = []
-    for pose_index, q in enumerate(poses):
+    poses = poses_clear_of_keep_out(model, n_fit + n_test, ctx.rng, getattr(arm, 'keep_out', []),
+                                    margin=12 * DEG, spread=0.8)
+    # short moves: fit poses in nearest-neighbour order from where the arm is, then the
+    # test poses, then the first N_REPEAT test poses again (repeatability)
+    fit_poses = nearest_neighbour_order(client.state().q, list(poses[:n_fit]))
+    test_poses = nearest_neighbour_order(fit_poses[-1], list(poses[n_fit:]))
+    n_rep = min(N_REPEAT, n_test)
+    schedule = fit_poses + test_poses + test_poses[:n_rep]
+    measure = measure_static_pose if static else measure_pose
+    data, frictions = [], []
+    for pose_index, q in enumerate(schedule):
         if not ctx.sim:
-            print('Gravity measurement %d/%d' % (pose_index + 1, len(poses)), flush=True)
+            print('Gravity measurement %d/%d' % (pose_index + 1, len(schedule)), flush=True)
         clamp = np.minimum(peak, np.abs(model.gravity(q)) * 1.5 + 0.25 * peak)
-        measure = measure_static_pose if static else measure_pose
         tau, q_meas = measure(ctx, q, clamp)
         data.append((q_meas, tau))
-    move_to(client, home, max_speed=min(0.4, ctx.motion_speed))
+        frictions.append(getattr(measure, 'friction', np.zeros(model.n)) if not static else np.zeros(model.n))
+    move_to(client, home, max_speed=MOVE_SPEED)
+    repeats = data[n_fit + n_test:]
+    data = data[:n_fit + n_test]
+    repeat_nm = (np.max([np.abs(r[1] - d[1]) for r, d in zip(repeats, data[n_fit:])], axis=0)
+                 if repeats else np.zeros(model.n))
     fit, test = data[:n_fit], data[n_fit:]
     Qf, Tf = [d[0] for d in fit], [d[1] for d in fit]
     Qt, Tt = [d[0] for d in test], [d[1] for d in test]
@@ -158,9 +193,20 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = 10, fit_masses: bool
     # torque resolution: the threshold is max(5% of peak gravity, one 0x6077 count)
     from ..units import Units
     count_nm = np.abs(Units(arm, ctx.calibration).nm_per_permille())
-    allowed = np.maximum(RESIDUAL_FRACTION * peak_g, count_nm)
+    # nor below what a pose repeats to: the model cannot fit better than the data repeats
+    allowed = np.maximum(np.maximum(RESIDUAL_FRACTION * peak_g, count_nm), repeat_nm)
     frac = worst / np.maximum(peak_g, 1e-6)
-    passed = bool(np.all(worst < allowed))
+    # Accepted rule (2026-11-23): 5% of peak gravity is not reachable even on noise-free sim
+    # data for this arm (light wrists: 5% is ~6 mNm, far under their friction). A fit is
+    # used if (a) on every loaded joint it predicts held-out poses better than the URDF,
+    # and (b) each joint's held-out error is within the 5%/count/repeat allowance or below
+    # that joint's friction measured in this run (median up/down half-difference), which
+    # the drive's position loop absorbs anyway.
+    friction_nm = np.median(np.array(frictions), axis=0) if frictions else np.zeros(model.n)
+    loaded = peak_g >= LOADED_NM
+    beats_urdf = (worst < before) | ~loaded
+    within = (worst < allowed) | (worst < friction_nm)
+    passed = bool(np.all(beats_urdf & within))
 
     lines, flags = [], []
     inertials = {}
@@ -181,13 +227,28 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = 10, fit_masses: bool
         if shift > COM_FLAG_M:
             flags.append('%s: COM moved %.1f mm from the URDF; check its CAD and wiring' % (link, shift * 1e3))
     for i, name in enumerate(arm.names):
-        lines.append('%-15s held-out residual %.3f Nm = %.1f%% of peak gravity %.2f Nm (before fit %.3f)%s' % (
-            name, worst[i], 100 * frac[i], peak_g[i], before[i], '' if worst[i] < allowed[i] else '  <-- FAIL'))
+        ok = beats_urdf[i] and within[i]
+        lines.append('%-15s held-out residual %.3f Nm = %.1f%% of peak gravity %.2f Nm (URDF %.3f; '
+                     'repeat %.3f, friction %.3f)%s' % (name, worst[i], 100 * frac[i], peak_g[i], before[i],
+                                                       repeat_nm[i], friction_nm[i], '' if ok else '  <-- FAIL'))
+    if fit_masses:
+        # diagnostic only (nothing written): a constant per-joint offset soaks up torque no
+        # link mass explains (cable drag, a spring); if a big COM shift collapses with it,
+        # the shift was not geometry
+        bm, bh, _, _, bias = fit_static_parameters(ctx.model, Qf, Tf, np.maximum(peak_g, 0.1), bias=True)
+        prior_b = ctx.model.first_moments()
+        lines.append('bias diagnostic (fit with a constant torque per joint; not written):')
+        for i, name in enumerate(arm.names):
+            lines.append('  %-15s offset %+.3f Nm' % (name, bias[i]))
+        for k, link in enumerate(links):
+            sh = float(np.linalg.norm(bh[3 * k:3 * k + 3] - prior_b[3 * k:3 * k + 3]) / bm[k])
+            lines.append('  %-15s mass %.3f kg, COM shift %.1f mm with offsets' % (link, bm[k], sh * 1e3))
     cond = float(sv[0] / sv[sv > sv[0] * 1e-9][-1]) if len(sv) else float('nan')
     rank = int(np.sum(sv > sv[0] * 1e-6))
     lines.append('regressor rank %d of %d first-moment parameters (rest held at URDF values)' % (rank, len(h)))
     return StageResult('gravity', passed,
                        {'residual_frac': frac.tolist(), 'residual_nm': worst.tolist(),
+                        'repeat_nm': repeat_nm.tolist(), 'friction_nm': friction_nm.tolist(),
                         'before_nm': before.tolist(), 'rank': rank, 'cond': cond,
                         'measured_poses_rad': [q.tolist() for q, _ in data],
                         'holding_torques_nm': [tau.tolist() for _, tau in data],

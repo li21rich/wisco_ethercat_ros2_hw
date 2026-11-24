@@ -75,6 +75,20 @@ class HardwareJoint:
         self.bus_position = int(row['bus_position'])
         self.model_name = row['model']
         self.pdo_profile = row.get('pdo_profile', '26042402')
+        self.coulomb_ff_nm = float(row.get('coulomb_ff_nm') or 0.0)   # CSP friction feedforward
+        # drive-internal loop gains (vendor 0x2002..0x2008, REAL32), written at start-up (RAM only)
+        gain_index = {'cur_kp': 0x2002, 'cur_ki': 0x2003, 'spd_kp': 0x2004, 'spd_ki': 0x2005,
+                      'pos_kp': 0x2006, 'pos_ki': 0x2007, 'pos_kd': 0x2008}
+        gains = row.get('drive_gains') or {}
+        unknown = sorted(set(gains) - set(gain_index))
+        if unknown:
+            raise ConfigError('joint %r: unknown drive_gains %s' % (self.name, unknown))
+        self.drive_gain_sdos = []
+        for key in sorted(gains):
+            value = float(gains[key])
+            if not math.isfinite(value) or value < 0:
+                raise ConfigError('joint %r: drive_gains.%s must be >= 0' % (self.name, key))
+            self.drive_gain_sdos.append({'index': gain_index[key], 'sub_index': 0, 'type': 'float', 'value': value})
         if self.pdo_profile not in ('legacy', '26042402'):
             raise ConfigError('joint %r: pdo_profile must be legacy or 26042402' % self.name)
         self.supports_torque_offset = self.pdo_profile != 'legacy'
@@ -260,7 +274,7 @@ class HardwareConfig:
         if dc and joint.pdo_profile != 'legacy':
             cfg['assign_activate'] = dc
         cfg['sdo'] = [{'index': 0x6060, 'sub_index': 0, 'type': 'int8',
-                       'value': self.mode_of_operation}]
+                       'value': self.mode_of_operation}] + list(joint.drive_gain_sdos)
 
         pos_factor, pos_offset = joint.position_state()
         cmd_pos_factor, cmd_pos_offset = joint.position_command()
@@ -396,8 +410,23 @@ class HardwareConfig:
             'torque_offset_enabled': [j.supports_torque_offset for j in self.joints],
             # planned velocity into 0x60B1 in CSP (0: off); joints without 0x1603 get none
             'velocity_ff_gain': float(arm_config.get('velocity_ff_gain', 1.0)),
+            'coulomb_ff_nm': [j.coulomb_ff_nm for j in self.joints],
             'calibration_file': calibration_file or '',
         }
+        zones = arm_config.get('keep_out_deg') or []
+        names = [j.name for j in self.joints]
+        for z in zones:
+            if z.get('joint') not in names or z.get('gate') not in names or z['joint'] == z['gate'] or \
+                    not float(z['lower']) < float(z['upper']):
+                raise ConfigError('keep_out_deg: bad zone %r' % (z,))
+        if zones:   # (omitted when empty: ROS cannot type an empty list)
+            params.update({
+                'keep_out_joint': [z['joint'] for z in zones],
+                'keep_out_gate': [z['gate'] for z in zones],
+                'keep_out_lower': [math.radians(float(z['lower'])) for z in zones],
+                'keep_out_upper': [math.radians(float(z['upper'])) for z in zones],
+                'keep_out_gate_min': [math.radians(float(z['gate_min'])) for z in zones],
+            })
         local = self.calibration.get('local_gravity')
         if relative and local_motion and local:
             n = len(self.joints)

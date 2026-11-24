@@ -185,3 +185,64 @@ TEST(ArmLaw, EaseInStartsAndEndsAtRest)
   EXPECT_NEAR((ease_in(0.0, 1.0, h, 0.02) - ease_in(0.0, 1.0, 0.0, 0.02)) / h, 0.0, 1e-2);
   EXPECT_NEAR((ease_in(0.0, 1.0, 0.02, 0.02) - ease_in(0.0, 1.0, 0.02 - h, 0.02)) / h, 0.0, 1e-2);
 }
+
+// Keep-out: joint 0 within [-0.3, 0.3] while joint 1 < 0.2 (arm01: J1 band while J2 is
+// rolled in). Mirrored in test/arm_stack/test_law.py.
+namespace
+{
+LawConfig keep_out_config()
+{
+  LawConfig c = config();
+  wisco_ethercat_ros2_hw::arm::KeepOut z;
+  z.joint = 0;
+  z.gate = 1;
+  z.lower = -0.3;
+  z.upper = 0.3;
+  z.gate_min = 0.2;
+  c.keep_out.push_back(z);
+  return c;
+}
+
+LawOutput keep_out_case(std::vector<double> q, std::vector<double> target, bool ignore = false)
+{
+  LawCommand cmd = command(kModeP);
+  cmd.q = target;
+  cmd.qd = {1.0, 1.0};
+  cmd.ignore_soft_limits = ignore;
+  LawOutput out;
+  compute(keep_out_config(), cmd, q, kQd, kG, out);
+  return out;
+}
+}  // namespace
+
+TEST(ArmLaw, KeepOutHoldsTheJointInItsBandWhileTheGateIsIn)
+{
+  const LawOutput out = keep_out_case({0.0, 0.0}, {0.8, 0.0});
+  EXPECT_DOUBLE_EQ(out.q_target[0], 0.3);
+  EXPECT_DOUBLE_EQ(out.q_target[1], 0.0);
+  EXPECT_TRUE(out.limit_hit);
+}
+
+TEST(ArmLaw, KeepOutHoldsTheGateOutOnceTheJointIsOut)
+{
+  const LawOutput out = keep_out_case({0.6, 0.3}, {0.6, 0.0});
+  EXPECT_DOUBLE_EQ(out.q_target[0], 0.6);
+  EXPECT_DOUBLE_EQ(out.q_target[1], 0.2);
+  EXPECT_TRUE(out.limit_hit);
+}
+
+TEST(ArmLaw, KeepOutAllowsTheFullRangeWithTheGateOut)
+{
+  const LawOutput out = keep_out_case({0.0, 0.3}, {0.8, 0.3});
+  EXPECT_DOUBLE_EQ(out.q_target[0], 0.8);
+  EXPECT_DOUBLE_EQ(out.q_target[1], 0.3);
+  EXPECT_FALSE(out.limit_hit);
+}
+
+TEST(ArmLaw, KeepOutIgnoresTrackingErrorAtTheBandEdgeAndSoftLimitOverrides)
+{
+  // 0.32 is within the 2 deg tolerance of the band: still "in", so the joint is held
+  const LawOutput out = keep_out_case({0.32, 0.0}, {0.8, 0.0}, true);
+  EXPECT_DOUBLE_EQ(out.q_target[0], 0.3);
+  EXPECT_DOUBLE_EQ(out.q_target[1], 0.0);
+}

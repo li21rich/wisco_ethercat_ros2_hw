@@ -23,6 +23,9 @@
   arm telemetry --cyclic        start live joint position and drive status with motor enabling off
   arm telemetry --log-angles CSV  save labeled poses from live feedback (Ctrl-C to finish)
   arm status                    latest calibration version and what it holds
+  arm rest                      move a running, powered arm to the hanging rest pose and hold it
+  arm autocal --cad-align       re-zero the latest stop-zero so its measured stops sit on the
+                                CAD stop angles, with the joint table's current directions
   arm export pace SESSION.mcap OUT
   arm export lerobot OUT SESSION.mcap [...]
 
@@ -113,6 +116,39 @@ def make_client(args, arm, calibration):
     if getattr(args, 'no_mocap', False):
         client.mocap = lambda: None
     return client
+
+
+REST_SPEED = 0.25    # rad/s peak: the first move after a launch, from wherever the arm hangs
+
+
+def cmd_rest(arm, calibration, client):
+    """Move a running, powered arm slowly to rest, the hanging pose stop-zero starts from and
+    returns to (J1 +90 deg, every other joint 0, elbow straight; 3 deg inside the soft limits),
+    and leave it there: the controller holds the last target after the commands stop."""
+    from .calib.common import DEG
+    from .calib.stop_zero import rough_pose
+    from .control.motion import move_to
+    from .hw.client import Command
+    try:
+        model = build_model(arm, calibration)
+        margin = np.minimum(3 * DEG, 0.2 * (model.upper - model.lower))
+        home = np.clip(rough_pose(arm, 'hanging'), model.lower + margin, model.upper - margin)
+        q = client.state().q.copy()
+        print('Moving to rest at %.2f rad/s:' % REST_SPEED)
+        for n, a, b in zip(arm.names, q, home):
+            print('  %-15s %+7.1f -> %+7.1f deg' % (n, a / DEG, b / DEG))
+        # A joint can start a little past its soft limit (wrist_pitch rests against its stop,
+        # 3 deg outside). The path is a straight line from where it is to home inside the
+        # limits, so let the targets pass them instead of snapping the first one inside.
+        client.send(Command(mode='P', q=q, gravity_ff=False, ignore_soft_limits=True))
+        move_to(client, home, max_speed=REST_SPEED, settle=0.5, gravity_ff=False, ignore_soft_limits=True)
+        print('At rest; the controller keeps holding.')
+        return 0
+    except KeyboardInterrupt:
+        print('Rest move stopped; the controller holds where it is.')
+        return 1
+    finally:
+        client.close()
 
 
 def session_meta(arm, store, calibration, client, operator):
@@ -208,6 +244,18 @@ def run_stage(name, args, arm, store, client, recorder=None, extra=None):
                 # the operator applies the tuning before validating; in sim do it in memory
                 arm.raw['repeatability_tuning'] = dict(result.joint_config_updates['repeatability_tuning'])
                 print('  (sim) repeatability_tuning applied in memory for the stages that follow')
+    if name == 'gravity' and not args.sim:
+        # keep the measured poses and torques whether or not the fit passed (a rerun costs
+        # ten minutes of arm time; the data can be refit offline)
+        import time as _time
+        log_dir = getattr(args, 'log_dir', None) or os.path.join(os.path.expanduser('~'), 'arm_logs')
+        os.makedirs(log_dir, exist_ok=True)
+        report = os.path.join(log_dir, 'gravity_%s.yaml' % _time.strftime('%Y%m%d_%H%M%S'))
+        with open(report, 'w') as f:
+            yaml.safe_dump({'passed': result.passed, 'calibration': store.latest_path(),
+                            'lines': result.lines, 'flags': result.flags,
+                            'metrics': _plain(result.metrics)}, f, sort_keys=False)
+        print('  data %s' % report)
     if name == 'validate':
         target = path or store.latest_path()
         if target:
@@ -326,7 +374,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog='arm', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('stage', choices=[s for s, _ in STAGES] + ['gravity-check', 'float', 'all', 'rig', 'status',
-                                                               'export', 'commission', 'autocal', 'reference', 'telemetry'])
+                                                               'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest'])
     p.add_argument('paths', nargs='*', help='export: kind and files')
     p.add_argument('--manual-shoulders', action='store_true', help='log externally measured J2 and J3 angles alongside telemetry')
     p.add_argument('--log-angles', metavar='CSV', help='telemetry: capture labeled poses from cyclic feedback')
@@ -341,9 +389,13 @@ def main(argv=None) -> int:
     stops.add_argument('--check-encoder', metavar='JOINT', help='compare all encoder readings during a small hand movement')
     stops.add_argument('--verify-stop', metavar='JOINT',
                        help='autocal: compare a hand-seated stop with its reference angle, drives disabled')
+    stops.add_argument('--cad-align', action='store_true',
+                       help='autocal: put the latest stop-zero\'s measured stops on the CAD stop angles')
     stops.add_argument('--stop-zero', action='store_true',
                    help='autocal: zero each axis against its nearer mechanical stop '
                         '(hardware from a rough home pose; --sim: simulated)')
+    p.add_argument('--old-directions', default=None,
+                   help='autocal --cad-align: joint table directions when an older stop-zero was measured')
     p.add_argument('--stop-tolerance-deg', type=float, default=None,
                    help='autocal --stop-zero: how far off the rough home pose may be per joint (default 10)')
     p.add_argument('--stop-pose', choices=['home', 'hanging'], default=None,
@@ -398,6 +450,15 @@ def main(argv=None) -> int:
             p.error('--verify-stop applies to autocal')
         from .calib.stop_zero import verify_stop
         return verify_stop(args)
+    if args.cad_align:
+        if args.stage != 'autocal':
+            p.error('--cad-align applies to autocal')
+        from .calib.stop_zero import run_cad_align
+        try:
+            return run_cad_align(args)
+        except (RuntimeError, ValueError, OSError) as error:
+            print('cad-align: %s' % error, file=sys.stderr)
+            return 1
     if args.stop_zero:
         if args.stage != 'autocal':
             p.error('--stop-zero applies to autocal')
@@ -461,7 +522,14 @@ def main(argv=None) -> int:
     if calibration.get('version') in (None, 0) and not args.sim and args.stage not in (
             'bringup', 'indicator', 'zero', 'all', 'rig'):
         print('warning: no calibration file yet for %s; run arm bringup and arm zero first' % arm.arm)
+    if args.stage == 'rest' and not args.sim:
+        from .hw.ros_client import RosArmClient
+        # started with the launch: the drives can take a minute to reach OP
+        return cmd_rest(arm, calibration, RosArmClient(arm, calibration, node_name='arm_rest',
+                                                       state_timeout=180.0))
     client = make_client(args, arm, calibration)
+    if args.stage == 'rest':
+        return cmd_rest(arm, calibration, client)
     recorder = None
     if not args.no_log or args.record is not None:
         from .log.recorder import Recorder, RecordingClient, SessionRejected

@@ -296,7 +296,7 @@ Geometry   visual = collision = the link's STL.
     <child link="link1" />
     <origin xyz="-0.000156330126 -0.188873205 -0.0333247018" rpy="2.0943951 4.98352458e-15 -3.14159265" />
     <axis xyz="0 0 1" />
-    <limit lower="-1.5707963267948966" upper="3.141592653589793" effort="20" velocity="16.022122533307947" />
+    <limit lower="-2.6179938779914944" upper="2.6179938779914944" effort="20" velocity="16.022122533307947" />
   </joint>
   <joint name="shoulder_roll" type="revolute">
     <parent link="link1" />

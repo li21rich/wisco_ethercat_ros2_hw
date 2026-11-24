@@ -31,7 +31,7 @@ def test_passive_stop_check_uses_independent_angles(monkeypatch, capsys, second_
         assert 'conditional CAD angle 35.04 deg' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('side, endpoint', [('lower', -90), ('upper', 180)])
+@pytest.mark.parametrize('side, endpoint', [('lower', -150), ('upper', 150)])
 def test_j1_endpoints_relative_to_start(monkeypatch, capsys, side, endpoint):
     poses = iter([0, endpoint, 0, endpoint])
     answers = iter([side, '', '', '', ''])
@@ -102,9 +102,26 @@ def test_verify_disables_only_enabled_drives_and_checks_status(monkeypatch):
         writes.append(int(pos))
         enabled.remove(int(pos))
     monkeypatch.setattr(reader, 'command', command)
-    monkeypatch.setattr(reader, 'upload', lambda pos, kind, index: 4 if pos in enabled else 0)
+    rated = {j.bus_position: round(j.rated_current_a * 2 ** 0.5 * 1000) for j in arm.joints}
+    def upload(pos, kind, index):
+        return rated[pos] if index == '0x6075' else (4 if pos in enabled else 0)
+    monkeypatch.setattr(reader, 'upload', upload)
     reader.disable_for_verification(arm)
     assert writes == [1, 2]
+
+
+def test_rated_current_mismatch_stops_before_anything_moves(monkeypatch):
+    """0x6075 is rated rms x sqrt 2 in mA; a drive reporting the rms value (or another
+    model) would scale every torque by 1.41, so autocal refuses to start."""
+    from arm_stack.calib.commission import EncoderReader
+    from arm_stack.config import load_arm
+    reader = EncoderReader()
+    arm = load_arm()
+    monkeypatch.setattr(reader, 'command', lambda *args: 'Active: no\nSlaves: 7')
+    monkeypatch.setattr(reader, 'upload', lambda pos, kind, index:
+                        round(arm.joints[pos].rated_current_a * 1000) if index == '0x6075' else 0)
+    with pytest.raises(RuntimeError, match='rated current'):
+        reader.disable_for_verification(arm)
 
 
 # --------------------------------------------------------------------------- hardware stop-zero
@@ -456,3 +473,36 @@ def test_stick_slip_is_not_a_stop():
                     beyond=300 * deg, breakaway=3 * deg, speed=0.7, approach_speed=1.0,
                     baseline='measured', clip_near=False, gravity_ff=False, confirm_s=0.3)
     assert hit == pytest.approx(-150 * deg, abs=1 * deg)
+
+
+def test_cad_alignment_maps_measured_stops_onto_cad_stops_with_a_flip():
+    """A flipped joint (direction -1 now, +1 when measured) puts its lower measured stop on the
+    upper CAD stop; the zero follows q = d * r - z for both directions."""
+    from arm_stack.calib.stop_zero import cad_alignment, stop_references, SOFT_INSET
+    from arm_stack.config import load_arm
+    arm = load_arm()
+    names = arm.names
+    flipped = 'shoulder_roll'
+    for j in arm.joints:
+        j.direction = -1 if j.name == flipped else 1
+    cad = stop_references(arm)
+    rng = np.random.default_rng(0)
+    raw_lo = rng.uniform(-3, 0, arm.n)                 # raw (direction +1) stop readings
+    travel = cad[:, 1] - cad[:, 0] + np.deg2rad(1.0)   # pressed travel 1 deg longer than CAD
+    z_old = rng.uniform(-1, 1, arm.n)
+    refs = {n: {'lower': {'stop_rad': float(raw_lo[i] - z_old[i])},
+                'upper': {'stop_rad': float(raw_lo[i] + travel[i] - z_old[i])}}
+            for i, n in enumerate(names) if n != 'shoulder_pitch'}
+    calibration = {'zero_offsets_rad': dict(zip(names, z_old.tolist())),
+                   'soft_limits_rad': {'shoulder_pitch': [-1.5, 3.0]},
+                   'commissioning': {'references': refs}}
+    zeros, limits, report = cad_alignment(arm, calibration, {n: 1 for n in names}, cad)
+    for i, j in enumerate(arm.joints):
+        if j.name == 'shoulder_pitch':
+            assert zeros[j.name] == z_old[i]
+            continue
+        q = sorted(j.direction * r - zeros[j.name] for r in (raw_lo[i], raw_lo[i] + travel[i]))
+        assert np.allclose(q, [cad[i, 0] - np.deg2rad(0.5), cad[i, 1] + np.deg2rad(0.5)])
+        assert limits[j.name][0] >= q[0] + SOFT_INSET - 1e-9
+        assert limits[j.name][1] <= q[1] - SOFT_INSET + 1e-9
+        assert report[j.name]['flipped'] == (j.name == flipped)

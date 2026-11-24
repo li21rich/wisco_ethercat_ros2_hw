@@ -51,11 +51,35 @@ def payload_gravity(model, q, payload, frame: Optional[str] = None) -> np.ndarra
     return Jp.T @ np.array([0.0, 0.0, 9.81 * float(payload[0])])
 
 
+KEEP_OUT_TOLERANCE = 0.035   # rad (2 deg); mirrors kKeepOutTolerance in arm_law.hpp
+
+
+def apply_keep_out(zones, q, q_d):
+    """Project targets out of the keep-out zones (mirrors arm_law.hpp apply_keep_out).
+
+    zones: (joint, gate, lower, upper, gate_min) tuples: while q[gate] < gate_min,
+    q[joint] must stay in [lower, upper]. The measured state picks the side: a joint
+    already out of its band holds the gate at gate_min, otherwise the joint is held in
+    its band. Returns (q_d, hit)."""
+    q_d = np.array(q_d, float)
+    hit = False
+    for joint, gate, lower, upper, gate_min in zones:
+        if lower <= q_d[joint] <= upper or q_d[gate] >= gate_min:
+            continue
+        hit = True
+        if q[joint] < lower - KEEP_OUT_TOLERANCE or q[joint] > upper + KEEP_OUT_TOLERANCE:
+            q_d[gate] = gate_min
+        else:
+            q_d[joint] = min(max(q_d[joint], lower), upper)
+    return q_d, hit
+
+
 class ControlLaw:
 
     def __init__(self, model, max_torque, max_vel, soft_lower, soft_upper, kd_fallback,
-                 soft_margin=0.05):
+                 soft_margin=0.05, keep_out=()):
         self.model = model
+        self.keep_out = tuple(keep_out)
         self.max_torque = np.asarray(max_torque, float)
         self.max_vel = np.asarray(max_vel, float)
         self.lower = np.asarray(soft_lower, float)
@@ -99,6 +123,12 @@ class ControlLaw:
         limit_hit = bool(np.any(q_d < self.lower) or np.any(q_d > self.upper))
         if not cmd.ignore_soft_limits:
             q_d = np.clip(q_d, self.lower, self.upper)
+        # self-collision keep-outs, enforced even with ignore_soft_limits
+        held, hit = apply_keep_out(self.keep_out, q, q_d)
+        if hit:
+            limit_hit = True
+            qd_d = np.where(held != q_d, 0.0, qd_d)   # held targets: no velocity toward the zone
+            q_d = held
         # velocity clamp on the target rate
         qd_d = np.clip(qd_d, -self.max_vel, self.max_vel)
 

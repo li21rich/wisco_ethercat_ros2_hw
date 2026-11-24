@@ -452,6 +452,7 @@ def run_hardware(args, reader=None, launch_factory=None):
                                                       'tolerance_deg': float(tolerance_deg),
                                                       'joints_left_on_it': unreferenced},
                                   'references': contacts, 'direction_and_scale': 'configured',
+                                  'directions': {j.name: int(j.direction) for j in arm.joints},
                                   'mechanical_stops_measured': True, 'range_kind': 'both_stops_per_joint',
                                   'relative_motion': False, 'local_checks_passed': False},
                 'local_gravity': None, 'link_inertials': None, 'gravity_validation': None,
@@ -480,6 +481,101 @@ def run_hardware(args, reader=None, launch_factory=None):
             finally:
                 if launch is not None:
                     launch.close()
+
+
+def cad_alignment(arm, calibration, old_directions, cad_stops, old_zero=None):
+    """Zeros and soft limits that put each measured stop pair on its CAD contact pair.
+
+    A stop-zero run measures both stops in its rough frame (q = d_old * r - z_old).
+    With the joint table's current direction d, q_new = s * q_old + c, s = d / d_old,
+    where c centers the measured pair on the CAD pair (the few degrees by which the
+    pressed travel exceeds the CAD contact-onset travel split evenly). s = -1 maps
+    the lower measured stop onto the upper CAD stop. Joints without measured stops
+    keep their zero (J1: rough reference). Returns (zeros, soft_limits, report)."""
+    refs = (calibration.get('commissioning') or {}).get('references') or {}
+    # the zeros the stops were measured with (they move once a run is aligned)
+    old_zero = old_zero or calibration.get('zero_offsets_rad') or {}
+    model_lower, model_upper = arm_urdf_limits(arm)
+    zeros, limits, report = {}, {}, {}
+    for i, joint in enumerate(arm.joints):
+        n = joint.name
+        d_old = int(old_directions[n])
+        s = int(joint.direction) * d_old
+        lo_u, hi_u = float(model_lower[i]), float(model_upper[i])
+        if n not in refs:
+            if s != 1:
+                raise ValueError('%s has no measured stops, so its direction cannot change here.' % n)
+            zeros[n] = float(old_zero[n])
+            limits[n] = (calibration.get('soft_limits_rad') or {}).get(n) or [lo_u, hi_u]
+            continue
+        lo, hi = refs[n]['lower']['stop_rad'], refs[n]['upper']['stop_rad']
+        cad_lo, cad_hi = float(cad_stops[i][0]), float(cad_stops[i][1])
+        c = np.mean([cad_lo - lo, cad_hi - hi]) if s > 0 else np.mean([cad_hi + lo, cad_lo + hi])
+        # q_new = d * r - z_new = s * (q_old + z_old) - z_new  ==>  z_new = s * z_old - c
+        zeros[n] = float(s * float(old_zero[n]) - c)
+        stop_lo, stop_hi = sorted([s * lo + c, s * hi + c])
+        lim = [max(lo_u, stop_lo + SOFT_INSET), min(hi_u, stop_hi - SOFT_INSET)]
+        if lim[0] >= lim[1]:
+            raise ValueError('%s: the aligned stops %.1f..%.1f deg do not overlap the URDF range.'
+                             % (n, stop_lo / DEG, stop_hi / DEG))
+        limits[n] = [float(lim[0]), float(lim[1])]
+        excess = (stop_hi - stop_lo) - (cad_hi - cad_lo)
+        report[n] = {'flipped': s < 0, 'stops_deg': [stop_lo / DEG, stop_hi / DEG],
+                     'cad_deg': [cad_lo / DEG, cad_hi / DEG], 'excess_deg': excess / DEG,
+                     'rest_deg': (s * 0.0 + c) / DEG}
+    return zeros, limits, report
+
+
+def arm_urdf_limits(arm):
+    root = ET.parse(arm.urdf)
+    lower, upper = [], []
+    for n in arm.names:
+        limit = root.find("./joint[@name='%s']/limit" % n)
+        lower.append(float(limit.attrib['lower']))
+        upper.append(float(limit.attrib['upper']))
+    return np.array(lower), np.array(upper)
+
+
+def run_cad_align(args):
+    """`arm autocal --cad-align`: re-zero the latest stop-zero onto the CAD stop angles."""
+    arm = load_arm(args.arm)
+    store = CalibrationStore(arm, args.calib_root)
+    calibration = store.latest()
+    commissioning = calibration.get('commissioning') or {}
+    if commissioning.get('method') != 'powered_stop_zero':
+        raise ValueError('--cad-align needs a stop-zero calibration with both stops measured.')
+    frame = commissioning.get('references_frame')
+    old_zero = None
+    if frame:
+        # an aligned file: its stops are still in the frame they were measured in
+        old, old_zero = frame['directions'], frame['zero_offsets_rad']
+    else:
+        old = commissioning.get('directions')
+    if old is None:
+        if not args.old_directions:
+            raise ValueError('%s predates recorded directions: pass --old-directions (the joint '
+                             "table's directions when it was measured, one per joint)."
+                             % store.latest_path())
+        old = [int(v) for v in args.old_directions.split(',')]
+        if len(old) != arm.n or any(v not in (1, -1) for v in old):
+            raise ValueError('--old-directions needs %d values of 1 or -1.' % arm.n)
+        old = dict(zip(arm.names, old))
+    zeros, limits, report = cad_alignment(arm, calibration, old, stop_references(arm), old_zero)
+    for n, r in report.items():
+        print('%-14s %s stops %+7.2f .. %+7.2f deg on CAD %+7.2f .. %+7.2f (travel %+.2f deg longer); '
+              'rest at %+.1f deg; soft %+.1f .. %+.1f' % (
+                  n, 'FLIPPED' if r['flipped'] else '       ', *r['stops_deg'], *r['cad_deg'],
+                  r['excess_deg'], r['rest_deg'], limits[n][0] / DEG, limits[n][1] / DEG))
+    measured_in = {'directions': dict(old), 'zero_offsets_rad': dict(old_zero or calibration['zero_offsets_rad'])}
+    new_commissioning = dict(commissioning, directions={j.name: int(j.direction) for j in arm.joints},
+                             references_frame=measured_in,
+                             encoder_reference='mechanical_stops_on_cad',
+                             direction_and_scale='configured; roll/elbow from gravity vs range (2026-11-23)')
+    path = store.write('stop_zero_cad_align', {'zero_offsets_rad': zeros, 'soft_limits_rad': limits,
+                                               'commissioning': new_commissioning,
+                                               'coordinate_frame': 'urdf'})
+    print('Saved %s. Relaunch to load it.' % path)
+    return 0
 
 
 def return_to_rest(launch, client, rest):

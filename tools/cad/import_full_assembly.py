@@ -28,6 +28,7 @@ and inertials are the export's, unchanged.
 """
 
 import argparse
+import math
 import os
 import shutil
 import struct
@@ -49,6 +50,9 @@ JOINTS = {
 MIMIC = {'wrist_crank_joint': 1.0, 'wrist_rod_joint': -1.0}     # of wrist_pitch
 ROM_NAME = dict(JOINTS, J6='wrist_pitch')    # J6's range is the driven wrist pitch's
 LIMITS_FROM = {'wrist_pitch': 'J6', 'wrist_crank_joint': 'J6', 'wrist_rod_joint': 'J6'}
+# Operating ranges set on the arm, not by CAD (deg). J1 has no hard stop; the export's
+# -90..+180 are mate limits. 2026-11-23: +-150 deg (300 deg of travel, cables permitting).
+LIMIT_OVERRIDES_DEG = {'shoulder_pitch': (-150.0, 150.0)}
 POST_TOP_CAD = np.array([0.0, 0.0, 0.541])
 RZ90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 FLANGE_ALONG_J7_M = 0.005243        # J7 origin to the output face, on the J7 axis
@@ -145,7 +149,8 @@ def write_capture(src, path, T_base_cad):
                           for l in md['links']},
         'four_bar_in_link5': {k: v for k, v in md['four_bar'].items()
                               if k in ('input_origin', 'output_origin', 'input_pin', 'output_pin', 'axis')},
-        'operating_limits_deg': {ROM_NAME[j]: [float(r['operating_lower_deg']), float(r['operating_upper_deg'])]
+        'operating_limits_deg': {ROM_NAME[j]: list(LIMIT_OVERRIDES_DEG.get(ROM_NAME[j], (
+                                     float(r['operating_lower_deg']), float(r['operating_upper_deg']))))
                                  for j, r in rom.items()},
         'contact_onset_deg': {ROM_NAME[j]: [num(r['conditional_contact_lower_deg']),
                                           num(r['conditional_contact_upper_deg'])] for j, r in rom.items()},
@@ -211,6 +216,9 @@ def convert(src, out_urdf, mesh_dir):
             set_origin(o, T_base_cad @ origin_matrix(o))
         if new in LIMITS_FROM:
             joint.find('limit').attrib.update(j6_limit)
+        if new in LIMIT_OVERRIDES_DEG:
+            lo, hi = LIMIT_OVERRIDES_DEG[new]
+            joint.find('limit').attrib.update(lower=repr(math.radians(lo)), upper=repr(math.radians(hi)))
         if new in MIMIC:
             ET.SubElement(joint, 'mimic', joint='wrist_pitch', multiplier='%g' % MIMIC[new], offset='0')
 

@@ -16,6 +16,11 @@
 # rated torque, but the formulas use the rated current (0x6075, mA, SDO), so
 # they are per mille of RATED CURRENT here. 0x6076 rated torque is not
 # implemented. 0x6072 = 0 means the stall-current limit, not zero torque.
+# 0x6075 is that rated current as an Iq amplitude in mA, i.e. the datasheet rms
+# value x sqrt(2): read 2026-11-23 as 11000 (x4_10, 7.8 A), 8625 (x4_36, 6.1 A),
+# 13400 (x6_60, 9.5 A). So effort_nm_per_permille = Kt[Nm/Arms] x I_rated[Arms]
+# / 1000 is exact (the sqrt 2 cancels against Kt per peak amp). Stop-zero and
+# autocal refuse to run if a drive's 0x6075 disagrees (commission.py).
 #
 # Values marked "verify" still need a bench measurement.
 
@@ -33,9 +38,10 @@ models:
     counts_per_rev: 262144            # 0x6064 per output rev, 18-bit output encoder. Measured 2026-11-23:
                                       # at 131072 arm01 J6 stop-to-stop read 141 deg for its 70 deg range
     encoder_side: output
-    rated_current_a: 7.8              # phase, rms; 0x6075 default is the drive's internal value (read it)
+    rated_current_a: 7.8              # phase, rms; 0x6075 = 11000 mA = 7.8 x sqrt 2 (checked at autocal)
     peak_current_a: 19.5
-    kt_output_nm_per_a: 0.8           # datasheet; rated torque / rated current gives 0.51 (verify, `arm kt`)
+    kt_output_nm_per_a: 0.8           # datasheet per Arms; back-EMF 6 V/krpm gives 0.88 ideal, stall table
+                                      # 0.66 (5.2 Nm @ 7.8 A, friction included); `arm kt` measures it
     rated_torque_nm: 4.0
     # 0x6077 / 0x6071 scale: Nm per per-mille of rated current = Kt x I_rated / 1000
     effort_nm_per_permille: 0.00624

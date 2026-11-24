@@ -161,7 +161,7 @@ def test_limits_are_the_export_operating_ranges(model):
 
 def test_home_is_low_gravity_and_zero_is_stretched_out(arm):
     """q = 0 is the arm held out forward (worst shoulder load); `home_pose_rad` hangs the
-    upper arm with the elbow bent, the peg tip clear of the stand's base plate (z -0.541)."""
+    whole arm straight down from the stand."""
     m = ArmModel(arm.urdf, arm.names, home=arm.home)
     clamp = np.array([j.max_torque_nm for j in arm.joints])
     home = safe_home(m)
@@ -170,7 +170,7 @@ def test_home_is_low_gravity_and_zero_is_stretched_out(arm):
     assert np.abs(m.gravity(zero))[0] > 0.3 * clamp[0]
     tip0, tiph = m.fk(zero).translation, m.fk(home).translation
     assert tip0[0] > 0.4 and abs(tip0[2]) < 0.2           # out in front, near shoulder height
-    assert -0.49 < tiph[2] < -0.35 and tiph[0] < 0.35      # below the shoulder, peg clear of the base
+    assert tiph[2] < -0.5 and abs(tiph[0]) < 0.1           # straight down below the shoulder
     # the capture (the arm hanging in CAD) is within 15 deg of home on the shoulder
     assert abs(home[0] - CAPTURE['shoulder_pitch']) < math.radians(15)
 

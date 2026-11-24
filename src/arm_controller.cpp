@@ -49,11 +49,17 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<bool>("write_max_torque", false);
     auto_declare<std::vector<bool>>("torque_offset_enabled", std::vector<bool>{});
     auto_declare<double>("velocity_ff_gain", 1.0);
+    auto_declare<std::vector<double>>("coulomb_ff_nm", std::vector<double>{});
     auto_declare<std::string>("calibration_file", "");
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::vector<std::string>>("link_mass_names", std::vector<std::string>{});
     auto_declare<std::vector<double>>("link_mass_values", std::vector<double>{});
     auto_declare<std::string>("payload_frame", "tool0");
+    auto_declare<std::vector<std::string>>("keep_out_joint", std::vector<std::string>{});
+    auto_declare<std::vector<std::string>>("keep_out_gate", std::vector<std::string>{});
+    for (const char * name : {"keep_out_lower", "keep_out_upper", "keep_out_gate_min"}) {
+      auto_declare<std::vector<double>>(name, std::vector<double>{});
+    }
   } catch (const std::exception & e) {
     std::fprintf(stderr, "ArmController: exception in on_init: %s\n", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -90,6 +96,40 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     if (!(cfg_.max_torque[i] > 0) || !(cfg_.max_velocity[i] > 0) || !(cfg_.lower[i] < cfg_.upper[i])) {
       RCLCPP_ERROR(logger, "bad limits for joint '%s'", joints_[i].c_str());
       return controller_interface::CallbackReturn::ERROR;
+    }
+  }
+  {
+    const auto kj = node->get_parameter("keep_out_joint").as_string_array();
+    const auto kg = node->get_parameter("keep_out_gate").as_string_array();
+    const auto klo = node->get_parameter("keep_out_lower").as_double_array();
+    const auto khi = node->get_parameter("keep_out_upper").as_double_array();
+    const auto kmin = node->get_parameter("keep_out_gate_min").as_double_array();
+    const size_t k = kj.size();
+    if (kg.size() != k || klo.size() != k || khi.size() != k || kmin.size() != k) {
+      RCLCPP_ERROR(logger, "keep_out_* parameters need the same length");
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    cfg_.keep_out.clear();
+    auto index = [&](const std::string & name) {
+        return static_cast<size_t>(std::find(joints_.begin(), joints_.end(), name) - joints_.begin());
+      };
+    for (size_t z = 0; z < k; ++z) {
+      arm::KeepOut ko;
+      ko.joint = index(kj[z]);
+      ko.gate = index(kg[z]);
+      ko.lower = klo[z];
+      ko.upper = khi[z];
+      ko.gate_min = kmin[z];
+      if (ko.joint >= n || ko.gate >= n || ko.joint == ko.gate || !(ko.lower < ko.upper) ||
+        !std::isfinite(ko.gate_min))
+      {
+        RCLCPP_ERROR(logger, "bad keep-out zone %zu (%s gated by %s)", z, kj[z].c_str(), kg[z].c_str());
+        return controller_interface::CallbackReturn::ERROR;
+      }
+      cfg_.keep_out.push_back(ko);
+      RCLCPP_INFO(
+        logger, "keep-out: %s within [%.1f, %.1f] deg while %s < %.1f deg", kj[z].c_str(),
+        ko.lower * 180 / M_PI, ko.upper * 180 / M_PI, kg[z].c_str(), ko.gate_min * 180 / M_PI);
     }
   }
   cfg_.coulomb.assign(n, 0.0);
@@ -144,6 +184,32 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     return controller_interface::CallbackReturn::ERROR;
   }
   vff_.assign(n, 0.0);
+  {
+    auto valid = [n](const std::vector<double> & v) {
+      if (!v.empty() && v.size() != n) {return false;}
+      for (double x : v) {if (!std::isfinite(x) || x < 0.0 || x > 2.0) {return false;}}
+      return true;
+    };
+    const auto c = node->get_parameter("coulomb_ff_nm").as_double_array();
+    if (!valid(c)) {
+      RCLCPP_ERROR(logger, "'coulomb_ff_nm' needs %zu entries in [0, 2] Nm", n);
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    coulomb_ff_ = std::make_unique<std::atomic<double>[]>(n);
+    for (size_t i = 0; i < n; ++i) {coulomb_ff_[i] = c.empty() ? 0.0 : c[i];}
+    coulomb_cb_ = node->add_on_set_parameters_callback(
+      [this, n, valid](const std::vector<rclcpp::Parameter> & ps) {
+        rcl_interfaces::msg::SetParametersResult r;
+        r.successful = true;
+        for (const auto & p : ps) {
+          if (p.get_name() != "coulomb_ff_nm") {continue;}
+          const auto v = p.as_double_array();
+          if (!valid(v)) {r.successful = false; r.reason = "coulomb_ff_nm: n entries in [0, 2] Nm"; return r;}
+          for (size_t i = 0; i < n; ++i) {coulomb_ff_[i] = v.empty() ? 0.0 : v[i];}
+        }
+        return r;
+      });
+  }
   if (torque_offset_enabled_.empty()) {torque_offset_enabled_.assign(n, true);}
   if (torque_offset_enabled_.size() != n) {
     RCLCPP_ERROR(logger, "'torque_offset_enabled' needs %zu entries, got %zu", n,
@@ -523,6 +589,11 @@ controller_interface::return_type ArmController::update(
       // stall-current limit. Never let a zero (or tiny, rounding to 0 per mille)
       // clamp reach the drive: floor it at 1% of the configured max.
       cmd_max_[i].get().set_value(std::max(cap, kMinTorqueCapFraction * cfg_.max_torque[i]));
+    }
+    if (mode_p && vff != 0.0 && coulomb_ff_) {
+      // break the gearbox's static friction with the target, not after the error builds
+      tau = std::clamp(tau + coulomb_ff_[i].load(std::memory_order_relaxed) * std::tanh(vff / 0.02),
+          -cap, cap);
     }
     if (!cmd_off_[i]) {
       // 0x6071 is ignored in CSP. Keep the measured switching torque there

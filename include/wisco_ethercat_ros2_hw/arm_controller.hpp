@@ -52,6 +52,7 @@
 #ifndef WISCO_ETHERCAT_ROS2_HW__ARM_CONTROLLER_HPP_
 #define WISCO_ETHERCAT_ROS2_HW__ARM_CONTROLLER_HPP_
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -124,6 +125,10 @@ private:
   std::vector<hardware_interface::LoanedCommandInterface *> cmd_voff_;
   std::vector<double> vff_;          // low-passed velocity of the CSP target (rad/s)
   double velocity_ff_gain_ = 1.0;
+  // Coulomb friction feedforward into 0x60B2 in CSP (Nm, per joint), signed by the
+  // target velocity. Settable at runtime (parameter coulomb_ff_nm) for tuning.
+  std::unique_ptr<std::atomic<double>[]> coulomb_ff_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr coulomb_cb_;
   std::vector<StateRef> st_pos_, st_vel_, st_eff_, st_status_, st_mode_;
   bool drive_feedback_ = false;
   bool hold_on_startup_ = false;

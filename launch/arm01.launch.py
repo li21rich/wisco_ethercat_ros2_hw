@@ -8,15 +8,19 @@ Mode T at 100 Hz by default), and the newest calibration version for arm01 if on
   ros2 launch wisco_ethercat_ros2_hw arm01.launch.py
   ros2 launch wisco_ethercat_ros2_hw arm01.launch.py use_mock_hardware:=true
   ros2 launch wisco_ethercat_ros2_hw arm01.launch.py calibration_file:=/path/to/2026-11-14_v3.yaml
+
+With enable_motion:=true the arm first moves slowly (0.25 rad/s) to the hanging rest
+pose (`arm rest`: J1 +90 deg, the rest 0) and then holds there; go_to_rest:=false holds wherever it is instead.
 """
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 from wisco_ethercat_ros2_hw.calibration_files import calibration_versions
 
@@ -44,7 +48,17 @@ def generate_launch_description():
         'enable_motion': 'false',
     }
     args = [DeclareLaunchArgument(k, default_value=v) for k, v in passthrough.items()]
+    args.append(DeclareLaunchArgument('go_to_rest', default_value='true',
+                                      description='with enable_motion: move to the hanging rest pose first'))
     include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'test_bench.launch.py')),
         launch_arguments={k: LaunchConfiguration(k) for k in passthrough}.items())
-    return LaunchDescription(args + [include])
+    rest = ExecuteProcess(
+        cmd=['ros2', 'run', PACKAGE, 'arm', 'rest', '--no-log',
+             '--arm', LaunchConfiguration('joints_file')],
+        output='screen',
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('enable_motion'), "' == 'true' and '",
+            LaunchConfiguration('go_to_rest'), "' == 'true' and '",
+            LaunchConfiguration('use_mock_hardware'), "' != 'true'"])))
+    return LaunchDescription(args + [include, rest])

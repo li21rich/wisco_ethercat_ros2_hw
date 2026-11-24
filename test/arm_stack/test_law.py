@@ -110,3 +110,50 @@ def test_wire_layout_round_trip():
     s = decode_state(state, n)
     assert s['mode'] == 'T' and s['limit_hit'] and not s['fallback']
     assert s['qd'].tolist() == [3, 4, 5]
+
+
+# Keep-out: joint 0 within [-0.3, 0.3] while joint 1 < 0.2 (same cases as test_arm_law.cpp).
+def keep_out_case(q, target, ignore=False):
+    lw = ControlLaw(FakeModel(G), max_torque=[10.0, 2.0], max_vel=[2.0, 4.0], soft_lower=[-1.0, -0.5],
+                    soft_upper=[1.0, 0.5], kd_fallback=[0.5, 0.1], keep_out=[(0, 1, -0.3, 0.3, 0.2)])
+    return lw.compute(cmd('P', q=np.array(target, float), qd=np.ones(2), ignore_soft_limits=ignore),
+                      0.0, np.array(q, float), Q, 'P')
+
+
+def test_keep_out_holds_the_joint_in_its_band_while_the_gate_is_in():
+    out = keep_out_case([0.0, 0.0], [0.8, 0.0])
+    assert list(out.q_target) == [0.3, 0.0] and out.limit_hit
+
+
+def test_keep_out_holds_the_gate_out_once_the_joint_is_out():
+    out = keep_out_case([0.6, 0.3], [0.6, 0.0])
+    assert list(out.q_target) == [0.6, 0.2] and out.limit_hit
+
+
+def test_keep_out_allows_the_full_range_with_the_gate_out():
+    out = keep_out_case([0.0, 0.3], [0.8, 0.3])
+    assert list(out.q_target) == [0.8, 0.3] and not out.limit_hit
+
+
+def test_keep_out_ignores_tracking_error_at_the_band_edge_and_soft_limit_overrides():
+    out = keep_out_case([0.32, 0.0], [0.8, 0.0], ignore=True)
+    assert list(out.q_target) == [0.3, 0.0]
+
+
+def test_keep_out_in_the_sim_stops_j1_short_of_the_plate():
+    from arm_stack.config import load_arm
+    from arm_stack.sim.arm_sim import SimArm, SimErrors
+    from arm_stack.control.motion import move_to
+    arm = load_arm('config/arms/arm01.yaml')
+    rest = np.radians([90, 5.6, 0, 3, 0, 0, 0])
+    c = SimArm(arm, {}, SimErrors.random(arm.n, seed=1, scale=0.0), q0=rest.copy(), seed=1)
+    move_to(c, rest, max_speed=0.5)
+    target = rest.copy(); target[0] = math.radians(150)
+    s = move_to(c, target, max_speed=0.5)
+    assert math.degrees(s.q[0]) == pytest.approx(120, abs=1.5)        # held at the band edge
+    target[1] = math.radians(20)
+    s = move_to(c, target, max_speed=0.5)
+    assert math.degrees(s.q[0]) == pytest.approx(150, abs=1.5)        # free once J2 is out
+    target[1] = math.radians(5)
+    s = move_to(c, target, max_speed=0.5)
+    assert math.degrees(s.q[1]) == pytest.approx(15, abs=1.5)         # J2 cannot roll back in

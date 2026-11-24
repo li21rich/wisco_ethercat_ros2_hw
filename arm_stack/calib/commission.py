@@ -55,8 +55,25 @@ class EncoderReader:
         if not count or int(count.group(1)) != arm.n:
             raise RuntimeError('Expected exactly %d responding drives.' % arm.n)
 
+    def check_rated_current(self, arm):
+        """0x6075 (mA) is the rated current as an Iq amplitude: datasheet rms x sqrt(2)
+        (x4_10 7.8 A -> 11000, x4_36 6.1 A -> 8625, x6_60 9.5 A -> 13400, read 2026-11-23).
+        Every Nm <-> per-mille conversion assumes it; a drive that disagrees (other
+        model, other firmware) would scale every torque, clamp and 0x6072 cap."""
+        bad = []
+        for joint in arm.joints:
+            got = self.upload(joint.bus_position, 'int32', '0x6075')
+            want = joint.rated_current_a * math.sqrt(2) * 1000.0
+            if abs(got / want - 1.0) > 0.02:
+                bad.append('%s: 0x6075 = %d mA, expected %.0f (rated %.2f A rms x sqrt 2)'
+                           % (joint.name, got, want, joint.rated_current_a))
+        if bad:
+            raise RuntimeError('Drive rated current does not match the model table, so torque '
+                               'units would be off:\n  ' + '\n  '.join(bad))
+
     def disable_for_verification(self, arm):
         self.require_idle_master(arm)
+        self.check_rated_current(arm)
         for joint in arm.joints:
             if self.upload(joint.bus_position, 'uint16', '0x6041') & 4:
                 self.require_idle_master(arm)

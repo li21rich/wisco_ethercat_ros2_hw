@@ -38,7 +38,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 # Operating ROM, degrees: the CAD export's (tools/cad/arm01_capture.json, written by
-# tools/cad/import_full_assembly.py): J1 -90..+180, J2 0..+190, J3 +-90, J4 0..+130,
+# tools/cad/import_full_assembly.py): J1 +-150 (set on the arm), J2 0..+190, J3 +-90, J4 0..+130,
 # J5 +-90, J6 +-35, J7 +-90.
 with open(os.path.join(REPO, 'tools', 'cad', 'arm01_capture.json')) as _f:
     ROM_DEG = {k: tuple(v) for k, v in json.load(_f)['operating_limits_deg'].items()}

@@ -29,16 +29,16 @@ urdf: urdf/arm01/arm01.urdf
 bus: {iface: enp3s0, cycle_us: 1000, dc_sync: true}
 
 # Resting pose every stage starts from and returns to (rad, 3 deg inside the limits
-# when used). The URDF's q = 0 is the arm stretched out forward, its worst gravity
-# load; this is the upper arm hanging (J1 +90 deg) with the elbow bent 45 deg, which
-# keeps the peg tip 10 cm above the stand's base plate (fully hanging, it is level with
-# the plate) at under 30% of any clamp. Also the zeroing jig pose unless `jig_pose_rad`
-# is given.
+# when used): the arm hanging straight down from its stand (J1 +90 deg, everything
+# else 0), where it settles by itself with the drives off. The URDF's q = 0 is the
+# arm stretched out forward, its worst gravity load. There is no base plate under
+# the stand (2026-11-23; the earlier 45 deg elbow cleared one). Also the zeroing jig
+# pose unless `jig_pose_rad` is given.
 home_pose_rad:
   shoulder_pitch: 1.5708
   shoulder_roll: 0.0
   shoulder_yaw: 0.0
-  elbow: 0.7854
+  elbow: 0.0
   forearm_yaw: 0.0
   wrist_pitch: 0.0
   wrist_yaw: 0.0
@@ -47,17 +47,29 @@ home_pose_rad:
 # spec's Mode P / Mode T; needs the ArmController).
 control_mode: arm
 
+# Self-collision keep-outs (URDF joint angles, deg). While `gate` is below `gate_min`,
+# `joint` must stay within [lower, upper]: the control law clamps targets into that
+# (arm_law.hpp / arm_stack/control/law.py), whatever the soft limits allow.
+# J1 swinging far with J2 rolled in drives the upper arm into the shoulder plate. By
+# hand, drives off (2026-11-23): contact at +39 deg back and -38 deg forward from
+# hanging (J1 = 90) with J2 at 0, growing with J2 (+55 at J2 2 deg); J2 clears it by
+# ~10 deg. Band: hanging +-30; gate 15 deg. Verified powered at the gate: J1 crept clear
+# to +150 and -30 deg, and with J2 in J1 stopped at the 120 deg band edge (2026-11-23).
+keep_out_deg:
+  - {joint: shoulder_pitch, lower: 60.0, upper: 120.0, gate: shoulder_roll, gate_min: 15.0}
+
 joints:
-  - name: shoulder_pitch      # J1, ROM -90..+180 deg (operating range; stops unverified)
+  - name: shoulder_pitch      # J1, ROM -150..+150 deg (operating range; no hard stop)
     bus_position: 0
     model: x6_60
     direction: 1
-    # The CAD export found no intrinsic J1 stop (clear at -93 and +183 deg); -90..+180
-    # are mate limits. `arm limits` keeps them as the soft limits instead of driving
-    # J1 past them into the cables. Remove once a physical stop is fitted.
+    # The CAD export found no intrinsic J1 stop (clear at -93 and +183 deg). Its range is
+    # set on the arm instead: +-150 deg (2026-11-23; URDF limit, overridden in
+    # tools/cad/import_full_assembly.py). `arm limits` keeps it as the soft limits instead
+    # of driving J1 into the cables. Remove once a physical stop is fitted.
     hard_stops: false
     gear_ratio: 19.612  # datasheet
-    counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
+    counts_per_rev: 131072  # 0x6064 per output rev (X6-60: 17-bit output encoder, V4 manual)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
     rated_current_a: 9.5  # datasheet rms; 0x6075 holds the drive value (read over SDO)
     max_torque_nm: 12.0  # bring-up clamp (x6_60: datasheet rated 20 Nm, peak in the model table)
@@ -66,9 +78,11 @@ joints:
   - name: shoulder_roll       # J2, ROM 0..+190 deg
     bus_position: 1
     model: x6_60
-    direction: 1
+    # -1 from the 2026-11-23 stop-zero gravity traces: hanging (zero gravity) is 2 deg from the +count stop and the arm sweeps
+    # 178 deg toward -counts; the URDF hangs at roll 0, its LOWER end.
+    direction: -1
     gear_ratio: 19.612  # datasheet
-    counts_per_rev: 131072  # 0x6064 per output rev (verify: arm indicator)
+    counts_per_rev: 131072  # 0x6064 per output rev (X6-60: 17-bit output encoder, V4 manual)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
     rated_current_a: 9.5  # datasheet rms; 0x6075 holds the drive value (read over SDO)
     max_torque_nm: 12.0  # bring-up clamp (x6_60: datasheet rated 20 Nm, peak in the model table)
@@ -77,7 +91,7 @@ joints:
   - name: shoulder_yaw        # J3, ROM -90..+90 deg
     bus_position: 2
     model: x4_36
-    direction: 1
+    direction: -1   # flipped 2026-11-23 by the powered direction check
     gear_ratio: 36  # datasheet
     counts_per_rev: 262144  # 0x6064 per output rev (18-bit; J5 jog 2026-11-23: 131072 read 2x)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
@@ -90,7 +104,9 @@ joints:
   - name: elbow               # J4, ROM 0..+130 deg
     bus_position: 3
     model: x4_36
-    direction: 1
+    # -1 from the 2026-11-23 stop-zero gravity traces: the +count stop is 28 deg from hanging, the -count stop 116 deg; the URDF
+    # hangs near elbow 5 deg, 10 deg above its LOWER stop, and +1 put the 8 Nm gravity peak there.
+    direction: -1
     gear_ratio: 36  # datasheet
     counts_per_rev: 262144  # 0x6064 per output rev (18-bit; J5 jog 2026-11-23: 131072 read 2x)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
@@ -125,10 +141,15 @@ joints:
     max_torque_nm: 2.5  # bring-up clamp (x4_10: datasheet rated 4.0 Nm, peak in the model table)
     max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 238 rpm = 24.9 rad/s)
     gains: {kp: 10.0, kd: 0.3}
+    # drive speed loop, tuned 2026-11-23 (factory spd_kp 0.005864, spd_ki 4.2e-6 stick-slipped:
+    # held 57% / 24% of moving cycles on J6 / J7, now 35% / 9%; no oscillation up to spd_ki 1e-3)
+    # pos_kp (factory 0.037699): 2026-11-23 sweep at the corrected scale, ripple 0.050 -> 0.039 deg at
+    # 0.15; 0.3 smoother still, 0.6 oscillated J7 at rest (0.18 deg), so 0.15 keeps 4x margin
+    drive_gains: {spd_kp: 0.03, spd_ki: 3.0e-4, pos_kp: 0.15}
   - name: wrist_yaw           # J7, ROM -90..+90 deg
     bus_position: 6
     model: x4_10
-    direction: 1
+    direction: -1   # flipped 2026-11-23 by the powered direction check
     gear_ratio: 12.5  # datasheet
     counts_per_rev: 262144  # 0x6064 per output rev (18-bit; stop-zero 2026-11-23: 131072 read 2x)
     encoder_side: output  # dual absolute encoder, 0x6064 output-referred (verify)
@@ -136,6 +157,11 @@ joints:
     max_torque_nm: 2.5  # bring-up clamp (x4_10: datasheet rated 4.0 Nm, peak in the model table)
     max_vel_rad_s: 2.0  # bring-up clamp (datasheet rated 238 rpm = 24.9 rad/s)
     gains: {kp: 10.0, kd: 0.3}
+    # drive speed loop, tuned 2026-11-23 (factory spd_kp 0.005864, spd_ki 4.2e-6 stick-slipped:
+    # held 57% / 24% of moving cycles on J6 / J7, now 35% / 9%; no oscillation up to spd_ki 1e-3)
+    # pos_kp (factory 0.037699): 2026-11-23 sweep at the corrected scale, ripple 0.050 -> 0.039 deg at
+    # 0.15; 0.3 smoother still, 0.6 oscillated J7 at rest (0.18 deg), so 0.15 keeps 4x margin
+    drive_gains: {spd_kp: 0.03, spd_ki: 3.0e-4, pos_kp: 0.15}
 
 # Weighed at assembly, one per link (kg). null: the URDF's placeholder mass is used.
 link_masses_kg:

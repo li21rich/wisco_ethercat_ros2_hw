@@ -17,6 +17,8 @@ class ArmLaunch:
             command = [
                 'ros2', 'launch', 'wisco_ethercat_ros2_hw', 'arm01.launch.py',
                 'joints_file:=' + arm.path, 'enable_motion:=' + str(enable_motion).lower(),
+                # the calibration tools drive the arm themselves
+                'go_to_rest:=false',
             ]
             if calibration_file:
                 command.append('calibration_file:=' + str(calibration_file))
