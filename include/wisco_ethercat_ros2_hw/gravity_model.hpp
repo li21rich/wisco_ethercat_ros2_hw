@@ -3,7 +3,8 @@
 
 // Gravity torques from the URDF, with the calibration layered on top the same
 // way arm_stack/model/robot.py does it: weighed masses and fitted COMs per
-// link (stage 5) and the mocap kinematic overlay. Joints not driven (the
+// link (stage 5), per-joint springs (joint_springs: offset + stiffness * q,
+// added to gravity()) and the mocap kinematic overlay. Joints not driven (the
 // wrist parallelogram's mimic joints) are locked at zero.
 //
 // Used by the ArmController's RT loop; test/test_gravity_parity.cpp checks it
@@ -71,6 +72,7 @@ private:
   Eigen::VectorXd q_;
   std::vector<pinocchio::JointIndex> jid_;
   std::vector<int> vidx_;
+  std::vector<double> spring_offset_, spring_k_;   // joint_springs, config order
   pinocchio::JointIndex payload_joint_ = 0;
   pinocchio::SE3 payload_placement_ = pinocchio::SE3::Identity();
   pinocchio::Inertia payload_base_ = pinocchio::Inertia::Zero();

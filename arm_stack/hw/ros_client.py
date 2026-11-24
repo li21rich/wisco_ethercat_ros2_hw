@@ -82,7 +82,11 @@ class RosArmClient(ArmClient):
         self.units = Units(arm, calibration)
         self._msg_type = Float64MultiArray
         if not rclpy.ok():
-            rclpy.init()
+            # No rclpy SIGINT handler: it would shut the context down on Ctrl-C, and the
+            # CLI's move to rest after a Ctrl-C needs the node. Python raises
+            # KeyboardInterrupt instead.
+            from rclpy.signals import SignalHandlerOptions
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self.node = rclpy.create_node(node_name)
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.pub = self.node.create_publisher(Float64MultiArray, '/%s/command' % controller, 10)

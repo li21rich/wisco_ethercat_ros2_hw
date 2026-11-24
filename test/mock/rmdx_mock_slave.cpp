@@ -269,7 +269,11 @@ TxPdo RmdxMockSlave::latch() const
   tx.velocity_actual = saturate_round<int32_t>(qd_ / rad_per_count());
   tx.torque_actual = saturate_round<int16_t>(tau_ / nm_per_permille());
   tx.error_code = error_code_;
-  tx.mode_display = mode_active_;
+  mode_shown_.push_back(mode_active_);
+  while (mode_shown_.size() > static_cast<size_t>(std::max(p_.mode_display_lag_cycles, 0)) + 1) {
+    mode_shown_.pop_front();
+  }
+  tx.mode_display = mode_shown_.front();
   return tx;
 }
 

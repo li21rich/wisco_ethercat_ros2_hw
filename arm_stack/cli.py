@@ -125,6 +125,15 @@ def cmd_rest(arm, calibration, client):
     """Move a running, powered arm slowly to rest, the hanging pose stop-zero starts from and
     returns to (J1 +90 deg, every other joint 0, elbow straight; 3 deg inside the soft limits),
     and leave it there: the controller holds the last target after the commands stop."""
+    try:
+        return go_to_rest(arm, calibration, client)
+    finally:
+        client.close()
+
+
+def go_to_rest(arm, calibration, client) -> int:
+    """cmd_rest without closing the client. Ctrl-C during the move stops it; the
+    controller then holds where the arm is."""
     from .calib.common import DEG
     from .calib.stop_zero import rough_pose
     from .control.motion import move_to
@@ -147,8 +156,6 @@ def cmd_rest(arm, calibration, client):
     except KeyboardInterrupt:
         print('Rest move stopped; the controller holds where it is.')
         return 1
-    finally:
-        client.close()
 
 
 def session_meta(arm, store, calibration, client, operator):
@@ -408,6 +415,12 @@ def main(argv=None) -> int:
     p.add_argument('--calib-root', default=None, help='calibration store root (default config/calib)')
     p.add_argument('--log-dir', default=None, help='MCAP session directory (default ~/arm_logs)')
     p.add_argument('--no-log', action='store_true')
+    p.add_argument('--tune-joints', default=None,
+                   help='gravity-check: tune the friction gain of these joints only (comma names)')
+    p.add_argument('--no-tune', action='store_true',
+                   help='gravity-check: drift test only, skip the friction-gain kicks')
+    p.add_argument('--no-rest', action='store_true',
+                   help='hardware: hold where the stage ends (or Ctrl-C stops it) instead of moving to rest')
     p.add_argument('--seed', type=int, default=0, help='sim error seed and pose sampling')
     p.add_argument('--error-scale', type=float, default=1.0, help='sim: scale of the injected errors')
     p.add_argument('--force', action='store_true', help='write results even if the stage failed')
@@ -422,7 +435,7 @@ def main(argv=None) -> int:
     p.add_argument('--lock', default=None, help='float: joints held still (names, indices or 0/1 mask)')
     p.add_argument('--friction-gain', default=None, help='float: Coulomb help, fraction (< 1; default: '
                    'joint config float_friction_gain, else 0.6); one value or one per joint')
-    p.add_argument('--damping', default=None, help='float: viscous damping, Nm s/rad (default 0)')
+    p.add_argument('--damping', default=None, help='float: viscous damping, Nm s/rad (default: joint config float_damping, else 0)')
     p.add_argument('--duration', type=float, default=None, help='float: seconds (default: until Ctrl-C)')
     p.add_argument('--record', nargs='?', const='', default=None,
                    help='float: record every cycle to MCAP (PATH, or a _teach file in --log-dir)')
@@ -560,7 +573,9 @@ def main(argv=None) -> int:
         extra = {'replay_trajectories': trajs, 'replay_dt': client.cmd_dt}
     if args.stage == 'gravity-check':
         from .control.float_mode import parse_payload
-        extra = {'payload': parse_payload(args.payload)}
+        extra = {'payload': parse_payload(args.payload), 'bisect': not args.no_tune}
+        if args.tune_joints:
+            extra['joints'] = [arm.names.index(nme.strip()) for nme in args.tune_joints.split(',')]
     elif args.stage == 'repeat':
         extra = {'indicators': args.indicators}
     try:
@@ -587,10 +602,24 @@ def main(argv=None) -> int:
             return run_rig(args, arm, store, client, recorder)
         r = run_stage(args.stage, args, arm, store, client, recorder, extra)
         return 0 if r.passed else 1
+    except KeyboardInterrupt:
+        print('\n%s stopped (Ctrl-C)' % args.stage)
+        return 130
     finally:
         if recorder is not None:
             print('  session %s' % recorder.path)
-        client.close()
+        try:
+            if not args.sim and not args.no_rest:
+                # every hardware stage ends at rest: done, failed or Ctrl-C (a second
+                # Ctrl-C stops the rest move and the controller holds where it is)
+                try:
+                    go_to_rest(arm, calibration, client)
+                except KeyboardInterrupt:
+                    print('Rest move stopped; the controller holds where it is.')
+                except Exception as error:     # bus down, no state: the controller fallback holds
+                    print('rest move failed (%s); the controller holds where it is' % error)
+        finally:
+            client.close()
 
 
 if __name__ == '__main__':

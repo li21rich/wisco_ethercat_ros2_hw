@@ -376,3 +376,35 @@ def test_autocal_stops_only_its_owned_process_group(monkeypatch):
     owned.close()
     assert signals == [(12345, signal.SIGINT), (12345, signal.SIGTERM)]
     assert owned.stream.closed
+
+
+def test_joint_springs_add_to_gravity_and_the_fit_recovers_them():
+    # arm01's J2 cable loop: ~-0.4 Nm near hanging, rising with the angle (2026-11-24)
+    from arm_stack.calib.gravity import fit_static_parameters
+    from arm_stack.cli import build_model
+    arm = load_arm()
+    model = build_model(arm, {})
+    truth = model.copy()
+    truth.apply_calibration({'joint_springs': {'shoulder_roll': {'offset_nm': -0.48, 'stiffness_nm_per_rad': 0.22}}})
+    q = (model.lower + model.upper) / 2
+    assert np.allclose(truth.gravity(q) - model.gravity(q), np.eye(arm.n)[1] * (-0.48 + 0.22 * q[1]))
+    assert np.allclose(truth.rigid_gravity(q), model.gravity(q))
+    assert np.allclose(truth.copy().gravity(q), truth.gravity(q))
+    rng = np.random.default_rng(7)
+    poses = rng.uniform(model.lower + 0.1, model.upper - 0.1, size=(60, arm.n))
+    torques = np.array([truth.gravity(q) for q in poses])
+    rigid_m, rigid_h, _, _ = fit_static_parameters(model, poses[:45], torques[:45], np.ones(arm.n))
+    masses, h, _, _, (off, k) = fit_static_parameters(model, poses[:45], torques[:45], np.ones(arm.n),
+                                                      springs=[0, 1, 2, 3])
+    assert off[1] == pytest.approx(-0.48, abs=0.03) and k[1] == pytest.approx(0.22, abs=0.02)
+    assert np.all(np.abs(off[[0, 2, 3]]) < 0.03) and np.all(off[4:] == 0)
+
+    def fitted(m, hh, springs=None):
+        out = model.copy()
+        out.apply_calibration({'link_inertials': {name: {'mass_kg': float(m[j]), 'com_m': (hh[3*j:3*j+3] / m[j]).tolist()}
+                                                  for j, name in enumerate(model.link_names())},
+                               'joint_springs': springs or {}})
+        return np.max(np.abs([out.gravity(q) - truth.gravity(q) for q in poses[45:]]), axis=0)
+    with_springs = fitted(masses, h, {n: {'offset_nm': float(off[i]), 'stiffness_nm_per_rad': float(k[i])}
+                                      for i, n in enumerate(arm.names)})
+    assert with_springs[1] < 0.03 < fitted(rigid_m, rigid_h)[1]

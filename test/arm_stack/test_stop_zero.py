@@ -31,7 +31,7 @@ def test_passive_stop_check_uses_independent_angles(monkeypatch, capsys, second_
         assert 'conditional CAD angle 35.04 deg' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('side, endpoint', [('lower', -150), ('upper', 150)])
+@pytest.mark.parametrize('side, endpoint', [('lower', -60), ('upper', 240)])
 def test_j1_endpoints_relative_to_start(monkeypatch, capsys, side, endpoint):
     poses = iter([0, endpoint, 0, endpoint])
     answers = iter([side, '', '', '', ''])

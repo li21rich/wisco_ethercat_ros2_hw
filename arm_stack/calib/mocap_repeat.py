@@ -37,7 +37,7 @@ import numpy as np
 from ..control.motion import Trace, move_to, stream, min_jerk
 from ..hw.client import Command, Payload
 from ..pace.bo import GPBO, Space
-from .common import DEG, StageContext, StageResult, feasible_poses, mount_payload, safe_home
+from .common import DEG, StageContext, StageResult, clear_of_keep_out, feasible_poses, mount_payload, safe_home
 
 RP_MM = 0.5
 DRIFT_MM = 0.25
@@ -70,10 +70,14 @@ def iso_poses(ctx: StageContext) -> np.ndarray:
     from the joint config if listed, else feasible random poses."""
     listed = (ctx.arm.raw.get('validation') or {}).get('iso_poses_rad')
     if listed:
-        return np.array(listed, float)
+        listed = np.array(listed, float)
+        bad = [i for i, q in enumerate(listed) if not clear_of_keep_out(ctx.arm.keep_out, q)]
+        if bad:
+            raise ValueError('validation.iso_poses_rad %s fall in a keep-out zone' % bad)
+        return listed
     rng = np.random.default_rng(42)
     return feasible_poses(ctx.model, POSES, rng, [j.max_torque_nm for j in ctx.arm.joints],
-                          spread=0.6)
+                          spread=0.6, zones=ctx.arm.keep_out)
 
 
 class Trial:

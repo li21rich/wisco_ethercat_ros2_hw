@@ -163,7 +163,8 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = None, rounds: int = 
         flags.append('mocap static noise above 0.1 mm')
 
     max_torque = [j.max_torque_nm for j in arm.joints]
-    pool = list(feasible_poses(model, n_fit + n_test * rounds, ctx.rng, max_torque, extra_mass=LOAD_KG))
+    pool = list(feasible_poses(model, n_fit + n_test * rounds, ctx.rng, max_torque, extra_mass=LOAD_KG,
+                                zones=arm.keep_out))
     if len(pool) < n_fit + n_test:
         return StageResult('mocap-calib', False, {}, {}, ['only %d feasible poses' % len(pool)])
     fit_poses, pool = pool[:n_fit], pool[n_fit:]

@@ -615,11 +615,15 @@ TEST_F(ArmMock, PayloadInGravityAndWatchdogFallback)
 // drive takes 3 cycles to act on 0x6060.
 TEST_F(ArmMock, CspCstSwitchingWithoutTorqueJump)
 {
-  struct Case {bool feedback; int delay;};
-  for (const Case & c : {Case{false, 0}, Case{true, 0}, Case{true, 3}}) {
+  // lag: 0x6061 shows the new mode this many cycles after the drive runs it (the RMD-X)
+  struct Case {bool feedback; int delay; int lag;};
+  for (const Case & c : {Case{false, 0, 0}, Case{true, 0, 0}, Case{true, 3, 0}, Case{true, 3, 4}}) {
     SCOPED_TRACE("drive_feedback " + std::to_string(c.feedback) + ", mode delay " +
-      std::to_string(c.delay));
+      std::to_string(c.delay) + ", display lag " + std::to_string(c.lag));
     Arm a = make_arm(c.feedback, c.delay);
+    for (size_t i = 0; i < a.h->hw().size(); ++i) {
+      a.h->hw().slave(i).params().mode_display_lag_cycles = c.lag;
+    }
     const std::vector<double> q0 = {0.2, -0.3};
     a.h->stream(command(kModeP, q0));
     a.h->cycle(400);

@@ -105,13 +105,16 @@ def r_squared(y, yhat) -> float:
 
 
 def feasible_poses(model: ArmModel, count: int, rng, max_torque, fraction=0.6, margin=10 * DEG,
-                   spread=0.8, extra_mass: float = 0.0, tries: int = 50):
+                   spread=0.8, extra_mass: float = 0.0, tries: int = 50, zones=()):
     """Random poses whose gravity load (plus `extra_mass` kg at the tool) stays
-    under `fraction` of each joint's torque limit, so Mode P holds them."""
+    under `fraction` of each joint's torque limit, so Mode P holds them, and that
+    clear the keep-out `zones` (ArmConfig.keep_out)."""
     limit = fraction * np.asarray(max_torque, float)
     out = []
     for _ in range(count * tries):
         q = random_poses(model, 1, rng, margin=margin, spread=spread)[0]
+        if not clear_of_keep_out(zones, q):
+            continue
         g = np.abs(model.gravity(q))
         if extra_mass:
             J = model.jacobian(q)[:3]

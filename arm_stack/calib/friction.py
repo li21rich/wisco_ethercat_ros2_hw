@@ -21,6 +21,21 @@ from .common import DEG, StageContext, StageResult, r_squared, safe_home
 R2_MIN = 0.9
 SPEED_FRACTIONS = (0.05, 0.1, 0.2, 0.35, 0.5)
 SPAN = 30 * DEG
+GATE_CLEARANCE = 5 * DEG   # past a keep-out gate's gate_min while its joint sweeps
+
+
+def fit_friction(vs, fs):
+    """f(v) = Fc sign(v) + Fv v + b with Fc, Fv >= 0. A negative free-fit Fv is the
+    Stribeck dip (friction falling off the low-speed end, arm01 J3/J4/J7 2026-11-23),
+    which this model cannot express: refit with Fv = 0. Returns (fc, fv, bias, r2)."""
+    vs, fs = np.asarray(vs, float), np.asarray(fs, float)
+    A = np.column_stack([np.sign(vs), vs, np.ones_like(vs)])
+    coef, *_ = np.linalg.lstsq(A, fs, rcond=None)
+    if coef[1] < 0:
+        c2, *_ = np.linalg.lstsq(A[:, [0, 2]], fs, rcond=None)
+        coef = np.array([c2[0], 0.0, c2[1]])
+    fc, fv, bias = (float(c) for c in coef)
+    return fc, fv, bias, r_squared(fs, A @ coef)
 
 
 def run(ctx: StageContext) -> StageResult:
@@ -30,6 +45,14 @@ def run(ctx: StageContext) -> StageResult:
     lines, flags, out, metrics = [], [], {}, {}
     ok = True
     for j, spec in enumerate(arm.joints):
+        # a keep-out joint sweeps with its gate open (arm01: J2 rolled out before J1
+        # swings past 60..120 deg), or the control law would hold it at the band edge
+        base = home.copy()
+        for joint, gate, _lo, _hi, gate_min in getattr(arm, 'keep_out', ()):
+            if joint == j:
+                base[gate] = min(max(base[gate], gate_min + GATE_CLEARANCE), model.upper[gate] - 5 * DEG)
+        if np.any(base != home):
+            move_to(client, base, max_speed=0.4)
         mid = home[j]
         vmax = min(spec.max_vel_rad_s, 1.5)
         speeds = [f * vmax for f in SPEED_FRACTIONS]
@@ -42,7 +65,7 @@ def run(ctx: StageContext) -> StageResult:
             lo = max(model.lower[j] + 5 * DEG, hi - span)
             for a, b in ((lo, hi), (hi, lo)):
                 tr = Trace()
-                q_start = home.copy()
+                q_start = base.copy()
                 q_start[j] = a
                 clamp = np.minimum(peak, np.abs(model.gravity(q_start)) * 1.5 + 0.3 * peak)
                 constant_velocity(client, j, a, b, v, trace=tr, torque_clamp=clamp)
@@ -60,11 +83,8 @@ def run(ctx: StageContext) -> StageResult:
                 vs.append(float(np.mean(d['qd'][w, j])))
                 fs.append(float(np.mean(tau - g) - M_jj * qdd_mean))
         vs, fs = np.array(vs), np.array(fs)
-        A = np.column_stack([np.sign(vs), vs, np.ones_like(vs)])
-        coef, *_ = np.linalg.lstsq(A, fs, rcond=None)
-        fc, fv, bias = coef
-        r2 = r_squared(fs, A @ coef)
-        good = r2 > R2_MIN and fc >= 0 and fv >= -1e-3
+        fc, fv, bias, r2 = fit_friction(vs, fs)
+        good = r2 > R2_MIN and fc >= 0
         ok &= good
         out[spec.name] = {'coulomb_nm': float(max(fc, 0.0)), 'viscous_nm_s_per_rad': float(max(fv, 0.0))}
         metrics[spec.name] = {'r2': r2, 'bias_nm': float(bias), 'speeds': vs.tolist(), 'friction': fs.tolist()}

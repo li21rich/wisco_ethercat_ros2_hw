@@ -105,6 +105,22 @@ bool GravityModel::build(
           }
         }
       }
+      spring_offset_.assign(joints.size(), 0.0);
+      spring_k_.assign(joints.size(), 0.0);
+      if (cal["joint_springs"] && cal["joint_springs"].IsMap()) {
+        for (size_t i = 0; i < joints.size(); ++i) {
+          const auto sp = cal["joint_springs"][joints[i]];
+          if (!sp) {continue;}
+          if (sp["offset_nm"] && !sp["offset_nm"].IsNull()) {spring_offset_[i] = sp["offset_nm"].as<double>();}
+          if (sp["stiffness_nm_per_rad"] && !sp["stiffness_nm_per_rad"].IsNull()) {
+            spring_k_[i] = sp["stiffness_nm_per_rad"].as<double>();
+          }
+          if (!std::isfinite(spring_offset_[i]) || !std::isfinite(spring_k_[i])) {
+            error = "joint_springs: non-finite value for " + joints[i];
+            return false;
+          }
+        }
+      }
       if (cal["kinematic_overlay"] && cal["kinematic_overlay"].IsMap()) {
         for (size_t i = 0; i < joints.size(); ++i) {
           const auto o = cal["kinematic_overlay"][joints[i]];
@@ -133,6 +149,9 @@ void GravityModel::gravity(const std::vector<double> & q, std::vector<double> & 
   for (size_t i = 0; i < jid_.size(); ++i) {q_[model_.joints[jid_[i]].idx_q()] = q[i];}
   const auto & tau = pinocchio::computeGeneralizedGravity(model_, *data_, q_);
   for (size_t i = 0; i < vidx_.size(); ++i) {g[i] = tau[vidx_[i]];}
+  for (size_t i = 0; i < spring_k_.size() && i < g.size(); ++i) {
+    g[i] += spring_offset_[i] + spring_k_[i] * q[i];
+  }
 }
 
 bool GravityModel::frame_placement(

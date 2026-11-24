@@ -51,8 +51,9 @@ MIMIC = {'wrist_crank_joint': 1.0, 'wrist_rod_joint': -1.0}     # of wrist_pitch
 ROM_NAME = dict(JOINTS, J6='wrist_pitch')    # J6's range is the driven wrist pitch's
 LIMITS_FROM = {'wrist_pitch': 'J6', 'wrist_crank_joint': 'J6', 'wrist_rod_joint': 'J6'}
 # Operating ranges set on the arm, not by CAD (deg). J1 has no hard stop; the export's
-# -90..+180 are mate limits. 2026-11-23: +-150 deg (300 deg of travel, cables permitting).
-LIMIT_OVERRIDES_DEG = {'shoulder_pitch': (-150.0, 150.0)}
+# -90..+180 are mate limits. 2026-11-23: +-150 deg around hanging (J1 = 90), i.e.
+# -60..+240 (300 deg of travel, cables permitting).
+LIMIT_OVERRIDES_DEG = {'shoulder_pitch': (-60.0, 240.0)}
 POST_TOP_CAD = np.array([0.0, 0.0, 0.541])
 RZ90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 FLANGE_ALONG_J7_M = 0.005243        # J7 origin to the output face, on the J7 axis

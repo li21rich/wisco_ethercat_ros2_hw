@@ -30,6 +30,12 @@ SWEEP = 2 * DEG
 SPEED = 0.056         # rad/s through each pose (0.04 until 2026-11-23, +40% on request)
 MOVE_SPEED = 0.56     # rad/s between poses (was the 0.4 calibration cap, +40%)
 N_FIT, N_TEST = 12, 4 # 16 poses x 7 joints for <= 28 parameters (rank ~14); was 32 + 10
+# Poses near hanging (the rest pose, where float starts): the random draw's 12 deg margin
+# and 0.8 spread never put J2 under ~31 deg, so the fit extrapolated there and floated
+# J2 up on its own (arm01, 2026-11-24). This many fit / test poses are drawn within
+# NEAR_HANGING_DEG of the hanging pose instead.
+N_NEAR_FIT, N_NEAR_TEST = 4, 2
+NEAR_HANGING_DEG = 30.0
 N_REPEAT = 2          # test poses measured twice: the repeatability floor of the pass check
 PRIOR_WEIGHT = 1e-3
 
@@ -66,7 +72,7 @@ def fit_first_moments(model, Q, T, masses, prior_h, weight=PRIOR_WEIGHT, scale=N
     for q, tau in zip(Q, T):
         Y, Y0 = model.gravity_first_moment_regressor(q)
         rows.append(Y / scale[:, None])
-        rhs.append((tau - Y0 @ masses) / scale)
+        rhs.append((tau - Y0 @ masses - model.springs(q)) / scale)
     A = np.vstack(rows)
     b = np.concatenate(rhs)
     lam = weight * np.trace(A.T @ A) / A.shape[1]
@@ -97,33 +103,57 @@ def measure_static_pose(ctx, q, clamp):
     return np.mean([r['tau'] for r in reads], axis=0), np.mean([r['q'] for r in reads], axis=0)
 
 
-def fit_static_parameters(model, Q, T, scale, bias=False):
+def spring_regressor(q, joints, n) -> np.ndarray:
+    """n x 2*len(joints): torque on joint j from (offset, stiffness) = (1, q_j)."""
+    S = np.zeros((n, 2 * len(joints)))
+    for c, j in enumerate(joints):
+        S[j, 2 * c] = 1.0
+        S[j, 2 * c + 1] = q[j]
+    return S
+
+
+def fit_static_parameters(model, Q, T, scale, bias=False, springs=()):
     """Regularized static mass/first-moment fit with positive mass bounds. With bias=True
     each joint also gets a constant torque offset (a diagnostic for forces no link mass
-    explains, e.g. cable drag); its values come back as a fifth element."""
+    explains, e.g. cable drag); its values come back as a fifth element. springs: joint
+    indices that also get offset + stiffness * q (not pulled toward the URDF: the URDF
+    has no springs); (offsets, stiffnesses) come back as the last element."""
     from scipy.optimize import lsq_linear
     n = model.n
+    springs = list(springs)
+    ns = 2 * len(springs)
     rows = []
     for q in Q:
         moments, masses = model.gravity_first_moment_regressor(q)
-        cols = [masses, moments] + ([np.eye(n)] if bias else [])
+        cols = [masses, moments] + ([np.eye(n)] if bias else []) + [spring_regressor(q, springs, n)]
         rows.append(np.column_stack(cols) / scale[:, None])
     A = np.vstack(rows)
     b = np.concatenate([t / scale for t in T])
-    prior = np.concatenate([model.masses(), model.first_moments()] + ([np.zeros(n)] if bias else []))
+    prior = np.concatenate([model.masses(), model.first_moments()] + ([np.zeros(n)] if bias else [])
+                           + [np.zeros(ns)])
     lam = PRIOR_WEIGHT * np.trace(A.T @ A) / A.shape[1]
-    augmented = np.vstack([A, np.sqrt(lam) * np.eye(len(prior))])
-    rhs = np.concatenate([b, np.sqrt(lam) * prior])
+    weight = np.full(len(prior), np.sqrt(lam))
+    weight[len(prior) - ns:] = np.sqrt(lam) * 1e-3          # springs: nearly free
+    augmented = np.vstack([A, np.diag(weight)])
+    rhs = np.concatenate([b, weight * prior])
     extra = [np.full(n, -np.inf)] if bias else []
-    lower = np.concatenate([0.05 * model.masses(), np.full(3 * n, -np.inf)] + extra)
-    upper = np.concatenate([5 * model.masses(), np.full(3 * n, np.inf)] + [-e for e in extra])
+    lower = np.concatenate([0.05 * model.masses(), np.full(3 * n, -np.inf)] + extra + [np.full(ns, -np.inf)])
+    upper = np.concatenate([5 * model.masses(), np.full(3 * n, np.inf)] + [-e for e in extra]
+                           + [np.full(ns, np.inf)])
     fit = lsq_linear(augmented, rhs, bounds=(lower, upper))
     if not fit.success:
         raise RuntimeError('Static gravity parameter fit did not converge.')
     _, singular, vt = np.linalg.svd(A, full_matrices=False)
     rank = int(np.sum(singular > singular[0] * 1e-6))
     out = (fit.x[:n], fit.x[n:4 * n], singular, vt[:rank])
-    return out + (fit.x[4 * n:],) if bias else out
+    if bias:
+        out = out + (fit.x[4 * n:5 * n],)
+    if springs:
+        sp = fit.x[len(prior) - ns:]
+        offsets, stiff = np.zeros(n), np.zeros(n)
+        offsets[springs], stiff[springs] = sp[0::2], sp[1::2]
+        out = out + ((offsets, stiff),)
+    return out
 
 
 def nearest_neighbour_order(start, poses):
@@ -138,6 +168,25 @@ def nearest_neighbour_order(start, poses):
     return [poses[i] for i in order]
 
 
+def poses_near_hanging(model, arm, count, rng, zones, reach_deg=NEAR_HANGING_DEG,
+                       margin=5 * DEG, tries=500) -> np.ndarray:
+    """Poses within reach_deg of the hanging pose (rough_pose 'hanging'), kept margin
+    inside the soft limits and clear of the keep-out zones."""
+    from .common import clear_of_keep_out
+    from .stop_zero import rough_pose
+    hang = rough_pose(arm, 'hanging')
+    margin = np.minimum(margin, 0.2 * (model.upper - model.lower))
+    lo, hi = model.lower + margin, model.upper - margin
+    out = []
+    for _ in range(count * tries):
+        q = np.clip(hang + rng.uniform(-1, 1, model.n) * reach_deg * DEG, lo, hi)
+        if clear_of_keep_out(zones, q):
+            out.append(q)
+            if len(out) == count:
+                return np.array(out)
+    raise RuntimeError('could not draw %d poses near hanging clear of the keep-out zones' % count)
+
+
 def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bool = False,
         static: bool = False) -> StageResult:
     client, arm = ctx.client, ctx.arm
@@ -147,8 +196,16 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bo
     home = safe_home(model)
     peak_g = model.peak_gravity_torque()
     peak = np.array([j.peak_torque_nm for j in arm.joints])
-    poses = poses_clear_of_keep_out(model, n_fit + n_test, ctx.rng, getattr(arm, 'keep_out', []),
-                                    margin=12 * DEG, spread=0.8)
+    zones = getattr(arm, 'keep_out', [])
+    n_near_fit, n_near_test = min(N_NEAR_FIT, n_fit // 3), min(N_NEAR_TEST, n_test // 2)
+    if 'elbow' not in arm.names:          # no hanging pose (the bench rig): random draws only
+        n_near_fit = n_near_test = 0
+    wide = poses_clear_of_keep_out(model, n_fit + n_test - n_near_fit - n_near_test, ctx.rng, zones,
+                                   margin=12 * DEG, spread=0.8)
+    near = (poses_near_hanging(model, arm, n_near_fit + n_near_test, ctx.rng, zones)
+            if n_near_fit + n_near_test else np.zeros((0, model.n)))
+    poses = np.concatenate([wide[:n_fit - n_near_fit], near[:n_near_fit],
+                            wide[n_fit - n_near_fit:], near[n_near_fit:]])
     # short moves: fit poses in nearest-neighbour order from where the arm is, then the
     # test poses, then the first N_REPEAT test poses again (repeatability)
     fit_poses = nearest_neighbour_order(client.state().q, list(poses[:n_fit]))
@@ -178,11 +235,18 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bo
     masses = model.masses()
     prior = model.first_moments()
     before = np.abs(residuals(model, Qt, Tt)).max(axis=0)
+    springs = None
     if fit_masses:
-        masses, h, sv, basis = fit_static_parameters(model, Qf, Tf, np.maximum(peak_g, 0.1))
+        # joint springs on the loaded joints: arm01's J2 carries a cable spring the rigid
+        # bodies cannot (-0.4 Nm near hanging, 2026-11-24)
+        spring_joints = [i for i in range(model.n) if peak_g[i] >= LOADED_NM]
+        masses, h, sv, basis, (sp_off, sp_k) = fit_static_parameters(
+            model, Qf, Tf, np.maximum(peak_g, 0.1), springs=spring_joints)
         fitted = {link: {'mass_kg': float(masses[k]), 'com_m': (h[3*k:3*k+3] / masses[k]).tolist()}
                   for k, link in enumerate(model.link_names())}
-        model.apply_calibration({'link_inertials': fitted})
+        springs = {name: {'offset_nm': float(sp_off[i]), 'stiffness_nm_per_rad': float(sp_k[i])}
+                   for i, name in enumerate(arm.names)}
+        model.apply_calibration({'link_inertials': fitted, 'joint_springs': springs})
     else:
         h, sv = fit_first_moments(model, Qf, Tf, masses, prior, scale=np.maximum(peak_g, 0.1))
         basis = fit_first_moments.row_space
@@ -243,6 +307,11 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bo
         for k, link in enumerate(links):
             sh = float(np.linalg.norm(bh[3 * k:3 * k + 3] - prior_b[3 * k:3 * k + 3]) / bm[k])
             lines.append('  %-15s mass %.3f kg, COM shift %.1f mm with offsets' % (link, bm[k], sh * 1e3))
+    if springs:
+        lines.append('joint springs (offset + stiffness x q, on the loaded joints):')
+        for name, e in springs.items():
+            if e['offset_nm'] or e['stiffness_nm_per_rad']:
+                lines.append('  %-15s %+.3f Nm %+.3f Nm/rad' % (name, e['offset_nm'], e['stiffness_nm_per_rad']))
     cond = float(sv[0] / sv[sv > sv[0] * 1e-9][-1]) if len(sv) else float('nan')
     rank = int(np.sum(sv > sv[0] * 1e-6))
     lines.append('regressor rank %d of %d first-moment parameters (rest held at URDF values)' % (rank, len(h)))
@@ -253,6 +322,10 @@ def run(ctx: StageContext, n_fit: int = None, n_test: int = None, fit_masses: bo
                         'measured_poses_rad': [q.tolist() for q, _ in data],
                         'holding_torques_nm': [tau.tolist() for _, tau in data],
                         'fit_poses': [q.tolist() for q in Qf], 'test_poses': [q.tolist() for q in Qt]},
-                       {'link_inertials': inertials,
-                        'gravity_validation': {'passed': passed, 'fit_masses': fit_masses,
-                                               'max_residual_nm': worst.tolist()}}, lines, flags)
+                       dict({'link_inertials': inertials,
+                             'gravity_validation': {'passed': passed, 'fit_masses': fit_masses,
+                                                    'max_residual_nm': worst.tolist(),
+                                                    # gravity-check's pass rule and its in/out-of-range note
+                                                    'friction_nm': friction_nm.tolist(),
+                                                    'poses_rad': [q.tolist() for q, _ in data]}},
+                            **({'joint_springs': springs} if springs else {})), lines, flags)

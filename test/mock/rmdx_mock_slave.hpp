@@ -16,6 +16,7 @@
 #define WISCO_ETHERCAT_ROS2_HW__MOCK__RMDX_MOCK_SLAVE_HPP_
 
 #include <cstdint>
+#include <deque>
 #include <vector>
 
 #include "cia402.hpp"
@@ -81,8 +82,13 @@ struct RmdxParams
 
   int boot_cycles = 2;                // NOT_READY_TO_SWITCH_ON -> SWITCH_ON_DISABLED after this
   int mode_switch_delay_cycles = 0;   // cycles between a new 0x6060 and the drive acting on it (guess)
+  // cycles 0x6061 trails the mode the drive runs (arm01 2026-11-23: the RMD-X ran CST
+  // for ~10 ms before 0x6061 showed it)
+  int mode_display_lag_cycles = 0;
   bool supports_torque_offset = true; // whether 0x60B2 is mapped and applied (unconfirmed on RMD-X)
-  bool torque_offset_in_cst = true;   // CiA402 adds 0x60B2 to 0x6071 in CST too (unconfirmed on RMD-X)
+  // CiA402 adds 0x60B2 to 0x6071 in CST too; the RMD-X does not (2026-11-23: CST on
+  // 0x6071 = 0 with 2.4 Nm in 0x60B2 measured 0.1 Nm on arm01 J2)
+  bool torque_offset_in_cst = false;
   bool holding_brake = false;         // power-off brake holds the joint when not enabled (guess:
                                       // depends on the RMD-X variant and its brake output config)
 };
@@ -156,6 +162,7 @@ private:
   double missed_time_ = 0.0;
 
   int8_t mode_active_ = cia402::kModeNone;
+  mutable std::deque<int8_t> mode_shown_;   // 0x6061 history for mode_display_lag_cycles
   int8_t mode_pending_ = cia402::kModeNone;
   int mode_pending_cycles_ = 0;
 

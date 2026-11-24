@@ -36,14 +36,27 @@ import numpy as np
 from ..control.float_mode import FloatConfig, FloatController, exit_to_hold, run_float
 from ..control.motion import move_to
 from ..hw.client import Command, Payload
-from .common import DEG, StageContext, StageResult, feasible_poses
+from .common import DEG, StageContext, StageResult, clear_of_keep_out, feasible_poses
 from .gravity import RESIDUAL_FRACTION
 
-DRIFT_S = 3.0
-DRIFT_STOP_RAD = 8 * DEG       # end a drift window early past this
-DRIFT_STOP_SPEED = 0.25        # rad/s
-MOVED_RAD = 0.1 * DEG
+# Gentle on hardware (2026-11-23, arm01): 2 s windows cut at 3 deg or 0.1 rad/s, moves
+# at 0.3 rad/s. Undamped: damping slows the drift into stick-slip, which the residual
+# estimate cannot see. (The earlier violence was the CSP -> CST torque gap.)
+DRIFT_S = 2.0
+DRIFT_STOP_RAD = 3 * DEG       # end a drift window early past this
+DRIFT_STOP_SPEED = 0.1         # rad/s
+DRIFT_MOVE_SPEED = 0.3         # rad/s between poses
+# A joint "moved" on net travel: on arm01 the light joints buzz in pure CST (J5 0.33 rad/s
+# peak over 0.3 deg, 2026-11-23), which is not a gravity drift
+MOVED_RAD = 0.5 * DEG
 MOVED_SPEED = 0.005
+MOVED_MIN_RAD = 0.05 * DEG     # ... or this much, if one way (net >= MONOTONIC x path)
+MONOTONIC = 0.7
+STOP_AVG_S = 0.1               # the speed cut-off uses velocity averaged over this
+SAFETY_STOP_SPEED = 0.5        # rad/s, any joint, judged or not
+# The CSP -> CST switch can slip a joint ~0.5 deg in the first 70 ms (arm01 elbow,
+# 2026-11-23): the drift window starts after this, measured from where the arm is then
+SETTLE_S = 0.3
 GAIN_MAX = 0.95
 MARGIN = 0.9
 V_KICK = 0.12                  # rad/s, above the Coulomb help's deadband + ramp
@@ -51,6 +64,10 @@ KICK_MAX_S = 0.5
 OBSERVE_S = 2.0
 STOP_SPEED = 0.01
 STOP_HOLD_S = 0.1
+# creep test after a kick, by position: arm01's 0x606C jitters +-0.01..0.04 rad/s (spikes
+# to 0.35) on a joint that has stopped (2026-11-23), so |qd| < STOP_SPEED rarely holds
+STOP_BAND_RAD = 0.1 * DEG      # stopped: position within this band ...
+STOP_WINDOW_S = 0.2            # ... over this long
 CREEP_RAD = 12 * DEG
 # kg m^2 at the output, until the PACE stage fits it (sim plant uses the same)
 ARMATURE_NOMINAL = {'x6_60': 0.03, 'x4_36': 0.012, 'x4_10': 0.004}
@@ -79,7 +96,7 @@ def estimate_residual(model, arm_inertia, trace, coulomb, viscous):
     float window (the unbalanced torque M a + f is what the model left over);
     returns (residual, moved mask)."""
     t, q, qd = trace['t'], trace['q'], trace['qd']
-    w = t >= min(0.05, t[-1] / 2)          # skip the T blend
+    w = t >= min(SETTLE_S, t[-1] / 2)      # skip the switch (T blend and any slip)
     t, q, qd = t[w], q[w], qd[w]
     tc = t - t.mean()
     a = (tc[:, None] * (qd - qd.mean(axis=0))).sum(axis=0) / max(float(np.dot(tc, tc)), 1e-12)
@@ -87,8 +104,47 @@ def estimate_residual(model, arm_inertia, trace, coulomb, viscous):
     f = (coulomb[None] * np.tanh(qd / 0.002) + viscous[None] * qd).mean(axis=0)
     speed = np.max(np.abs(qd), axis=0)
     # a window cut short by a fast drift is brief: speed alone says it moved
-    moved = (speed > MOVED_SPEED) & ((np.max(np.abs(q - q[0]), axis=0) > MOVED_RAD) | (speed > 10 * MOVED_SPEED))
+    # drift goes one way; a buzz goes back and forth (path >> net travel)
+    net = np.abs(q[-1] - q[0])
+    path = np.sum(np.abs(np.diff(q, axis=0)), axis=0) if len(q) > 1 else net
+    one_way = net >= MONOTONIC * np.maximum(path, 1e-12)
+    moved = (speed > MOVED_SPEED) & ((net > MOVED_RAD) | (one_way & (net > MOVED_MIN_RAD)))
     return -(M @ a + f), moved
+
+
+def drift_stop(q0, judged=None):
+    """Float stop test: a judged joint past DRIFT_STOP_RAD from q0 or faster than
+    DRIFT_STOP_SPEED, or any joint faster than SAFETY_STOP_SPEED, speeds averaged over
+    STOP_AVG_S (vibration spikes do not end the window). judged: joints gravity can move
+    (see run); the rest (arm01's wrists jump at the CST switch) only hit the safety cut."""
+    hist = []
+    judged = np.ones(len(q0), bool) if judged is None else np.asarray(judged, bool)
+
+    ref = [None]
+
+    def stop(s, t):
+        hist.append((t, s.q.copy()))
+        while len(hist) > 2 and hist[1][0] <= t - STOP_AVG_S:
+            hist.pop(0)
+        t0, qa = hist[0]
+        v = np.abs(s.q - qa) / (t - t0) if t - t0 >= 0.5 * STOP_AVG_S else np.zeros_like(s.q)
+        if np.max(v) > SAFETY_STOP_SPEED:
+            return True
+        if t < SETTLE_S:
+            return False
+        if ref[0] is None:
+            ref[0] = s.q.copy()
+        return bool(np.any((np.abs(s.q - ref[0]) > DRIFT_STOP_RAD) & judged)
+                    or np.any((v > DRIFT_STOP_SPEED) & judged))
+    return stop
+
+
+def judged_joints(ctx, model) -> np.ndarray:
+    """Joints a gravity error can slide: whole gravity load (<= 2x peak) at or above the
+    joint's friction (the gravity fit's measurement, else the friction model)."""
+    gv = ctx.calibration.get('gravity_validation') or {}
+    friction = np.asarray(gv.get('friction_nm') or model.coulomb, float)
+    return 2.0 * model.peak_gravity_torque() >= friction
 
 
 def drift_test(ctx, poses, cfg: FloatConfig, drift_s: float):
@@ -98,10 +154,9 @@ def drift_test(ctx, poses, cfg: FloatConfig, drift_s: float):
                                lock=np.zeros(cfg.n, bool))
     out = []
     for q in poses:
-        move_to(client, q, max_speed=0.5, settle=0.4, torque_clamp=cfg.torque_clamp)
-        stop = lambda s, t, q0=client.state().q.copy(): bool(  # noqa: E731
-            np.max(np.abs(s.q - q0)) > DRIFT_STOP_RAD or np.max(np.abs(s.qd)) > DRIFT_STOP_SPEED)
-        r = run_float(client, zero, duration=drift_s, stop=stop, log=ctx.log, hold_s=0.2)
+        move_to(client, q, max_speed=DRIFT_MOVE_SPEED, settle=0.4, torque_clamp=cfg.torque_clamp)
+        stop = drift_stop(client.state().q.copy(), judged_joints(ctx, model))
+        r = run_float(client, zero, duration=drift_s + SETTLE_S, stop=stop, log=ctx.log, hold_s=0.2)
         dtau, moved = estimate_residual(model, inertia, r.trace, model.coulomb, model.viscous)
         out.append({'q': np.asarray(q), 'dtau': dtau, 'moved': moved, 'seconds': r.seconds,
                     'travel': r.travel, 'stopped_early': r.reason == 'stop'})
@@ -118,7 +173,8 @@ def _creeps(ctx, cfg: FloatConfig, j: int, gain: float, sign: int, pose, observe
     lock[j] = False
     g = np.zeros(cfg.n)
     g[j] = gain
-    c = dataclasses.replace(cfg, friction_gain=g, damping=np.zeros(cfg.n), lock=lock)
+    # the float's own damping (joint config float_damping): the gain is tuned as float runs
+    c = dataclasses.replace(cfg, friction_gain=g, lock=lock)
     s = client.state()
     ctrl = FloatController(c, s.q)
     q0 = s.q[j]
@@ -131,16 +187,25 @@ def _creeps(ctx, cfg: FloatConfig, j: int, gain: float, sign: int, pose, observe
         client.send(cmd)
         s = client.step(dt)
         t += dt
-    creep, still, t = True, 0.0, 0.0
+    creep, t = True, 0.0
+    hist = []                                  # (t, q_j) over the last STOP_WINDOW_S
     while t < observe_s:
         client.send(ctrl.command(s, dt))
         s = client.step(dt)
         t += dt
-        still = still + dt if abs(s.qd[j]) < STOP_SPEED else 0.0
-        if still >= STOP_HOLD_S:
-            creep = False
-            break
-        if abs(s.q[j] - q0) > CREEP_RAD or abs(s.qd[j]) > 2.0 * V_KICK:
+        hist.append((t, s.q[j]))
+        while len(hist) > 2 and hist[1][0] <= t - STOP_WINDOW_S:
+            hist.pop(0)
+        span_t = t - hist[0][0]
+        if span_t >= 0.9 * STOP_WINDOW_S:
+            qs = [x[1] for x in hist]
+            if max(qs) - min(qs) < STOP_BAND_RAD:
+                creep = False
+                break
+            # runaway: averaged speed, not a 0x606C spike
+            if abs(hist[-1][1] - hist[0][1]) / span_t > 2.0 * V_KICK:
+                break
+        if abs(s.q[j] - q0) > CREEP_RAD:
             break
     exit_to_hold(client, c, ctrl, s, hold_s=0.1)
     return creep
@@ -172,9 +237,9 @@ def kick_pose(model, arm, rng):
     """Mid-range pose (room both ways for the kicks) if Mode P holds it easily, else a feasible one."""
     q = 0.5 * (model.lower + model.upper)
     clamp = np.array([j.max_torque_nm for j in arm.joints])
-    if np.all(np.abs(model.gravity(q)) < 0.6 * clamp):
+    if np.all(np.abs(model.gravity(q)) < 0.6 * clamp) and clear_of_keep_out(arm.keep_out, q):
         return q
-    return feasible_poses(model, 1, rng, clamp, fraction=0.5, margin=25 * DEG)[0]
+    return feasible_poses(model, 1, rng, clamp, fraction=0.5, margin=25 * DEG, zones=arm.keep_out)[0]
 
 
 def run(ctx: StageContext, payload: Optional[Sequence[float]] = None, n_poses: Optional[int] = None,
@@ -194,10 +259,10 @@ def run(ctx: StageContext, payload: Optional[Sequence[float]] = None, n_poses: O
         lines.append('payload %.3f kg at %s m (tool0) in the RT gravity' % (payload[0], list(payload[1:])))
 
     # 1. drift with gravity comp only
-    n_poses = n_poses or (3 if ctx.quick else 6)
+    n_poses = n_poses or (2 if ctx.quick else 4)
     rng = np.random.default_rng(7)
     poses = feasible_poses(model, n_poses, rng, clamp, fraction=0.5, margin=15 * DEG,
-                           extra_mass=payload[0])
+                           extra_mass=payload[0], zones=arm.keep_out)
     peak_g = model.peak_gravity_torque()
     results = drift_test(ctx, poses, cfg, drift_s)
     worst = np.zeros(n)
@@ -207,25 +272,47 @@ def run(ctx: StageContext, payload: Optional[Sequence[float]] = None, n_poses: O
         worst = np.maximum(worst, a)
         resolved |= r['moved']
     frac = worst / np.maximum(peak_g, 1e-6)
-    flagged = resolved & (frac > RESIDUAL_FRACTION)
+    # the gravity fit's rule: within 5% of peak gravity, or below the joint's friction
+    # (measured by the fit; else the friction model)
+    gv = ctx.calibration.get('gravity_validation') or {}
+    friction = np.asarray(gv.get('friction_nm') or model.coulomb, float)
+    # a joint whose whole gravity load (model and truth, <= 2x peak) is under its friction
+    # cannot be slid by a gravity error: its float motion is something else (arm01 wrists
+    # buzz in pure CST), so it is not judged
+    judged = judged_joints(ctx, model)
+    flagged = resolved & judged & (frac > RESIDUAL_FRACTION) & (worst >= friction)
+    fit_poses = np.asarray(gv.get('poses_rad') or [], float).reshape(-1, n)
     lines.append('drift: %d poses x %.0f s, gravity comp only (no friction help, no damping)' % (len(poses), drift_s))
     for i, j in enumerate(arm.joints):
-        if resolved[i]:
-            msg = 'residual %.3f Nm = %.1f%% of peak gravity %.2f Nm' % (worst[i], 100 * frac[i], peak_g[i])
+        if not judged[i]:
+            msg = 'not judged: peak gravity %.2f Nm is under half its friction %.3f Nm (moved %s)' % (
+                peak_g[i], friction[i], 'yes' if resolved[i] else 'no')
+        elif resolved[i]:
+            msg = 'residual %.3f Nm = %.1f%% of peak gravity %.2f Nm, friction %.3f Nm' % (
+                worst[i], 100 * frac[i], peak_g[i], friction[i])
         elif model.coulomb[i] > 0:
             msg = 'did not move: residual < breakaway (~Fc %.3f Nm = %.0f%% of peak gravity)' % (
                 model.coulomb[i], 100 * model.coulomb[i] / max(peak_g[i], 1e-6))
         else:
             msg = 'did not move: residual < breakaway (no friction model to put a number on it)'
-        lines.append('  %-15s %s%s' % (j.name, msg, '  <-- FLAG (> %.0f%%)' % (100 * RESIDUAL_FRACTION)
-                                       if flagged[i] else ''))
+        lines.append('  %-15s %s%s' % (j.name, msg, '  <-- FLAG (> %.0f%% and > friction)'
+                                       % (100 * RESIDUAL_FRACTION) if flagged[i] else ''))
+    if len(fit_poses):
+        lo, hi = fit_poses.min(axis=0), fit_poses.max(axis=0)
+        for k, r in enumerate(results):
+            q = r['q']
+            gap = np.max(np.abs(fit_poses - q), axis=1).min()
+            out = [arm.names[i] for i in range(n) if q[i] < lo[i] - 1e-9 or q[i] > hi[i] + 1e-9]
+            lines.append('  pose %d: nearest fit pose %.0f deg away%s' % (
+                k + 1, gap / DEG, '; outside the fit range on ' + ', '.join(out) if out else ''))
     for i in np.flatnonzero(flagged):
         flags.append('%s: gravity residual %.0f%% of peak in float; rerun arm gravity (or check the payload)'
                      % (arm.names[i], 100 * frac[i]))
     if any(r['stopped_early'] for r in results):
-        lines.append('  (windows cut short past %.0f deg or %.2f rad/s)' % (DRIFT_STOP_RAD / DEG, DRIFT_STOP_SPEED))
+        lines.append('  (windows cut short past %.0f deg or %.2f rad/s over %.1f s)'
+                     % (DRIFT_STOP_RAD / DEG, DRIFT_STOP_SPEED, STOP_AVG_S))
     metrics['drift'] = {'residual_nm': worst.tolist(), 'residual_frac': frac.tolist(),
-                        'resolved': resolved.tolist(), 'flagged': flagged.tolist(),
+                        'resolved': resolved.tolist(), 'flagged': flagged.tolist(), 'judged': judged.tolist(),
                         'peak_gravity_nm': peak_g.tolist(),
                         'per_pose': [{'q': r['q'].tolist(), 'dtau': r['dtau'].tolist(), 'moved': r['moved'].tolist(),
                                       'travel_deg': (r['travel'] / DEG).tolist(), 'seconds': r['seconds']}

@@ -303,8 +303,8 @@
  },
  "operating_limits_deg": {
   "shoulder_pitch": [
-   -150.0,
-   150.0
+   -60.0,
+   240.0
   ],
   "shoulder_roll": [
    0.0,

@@ -572,8 +572,8 @@ controller_interface::return_type ArmController::update(
       out_.tau[i] = tau;
     }
     // Torque channel: 0x60B2 offset in CSP, 0x6071 target in CST. While a
-    // switch is pending, 0x60B2, which CiA402 adds in both modes, so the
-    // torque is applied whichever mode the drive runs this cycle.
+    // switch is pending, both, so the torque is applied whichever mode the
+    // drive runs this cycle (CSP ignores 0x6071; the RMD-X ignores 0x60B2 in CST).
     cmd_mode_[i].get().set_value(static_cast<double>(requested));
     cmd_pos_[i].get().set_value(target);
     double cap = cfg_.max_torque[i];
@@ -602,7 +602,14 @@ controller_interface::return_type ArmController::update(
       const double effort = mode_p ? std::clamp(tau_switch_[i], -cap, cap) : tau;
       cmd_eff_[i].get().set_value(effort);
       out_.tau[i] = mode_p ? 0.0 : tau;
-    } else if (requested == arm::kCsp || pending) {
+    } else if (pending) {
+      // The drive switches before its 0x6061 shows it, and the RMD-X does not add
+      // 0x60B2 in CST: with 0x6071 = 0 here it ran CST on zero torque for ~10 ms
+      // (2026-11-23: J2 2.4 Nm commanded, 0.1 Nm measured, the arm dropped at every
+      // CSP -> CST switch). Send the torque on both channels until the mode shows.
+      cmd_off_[i]->set_value(tau);
+      cmd_eff_[i].get().set_value(tau);
+    } else if (requested == arm::kCsp) {
       cmd_off_[i]->set_value(tau);
       cmd_eff_[i].get().set_value(0.0);
     } else {

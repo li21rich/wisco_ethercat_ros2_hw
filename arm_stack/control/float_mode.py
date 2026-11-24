@@ -43,22 +43,44 @@ from ..hw.client import ArmClient, Command, JointState
 
 DEG = math.pi / 180.0
 
-DEADBAND = 0.02               # rad/s: no Coulomb help below this
-RAMP = 0.03                   # rad/s: smoothstep to full help over this
+# Coulomb help follows the 20 ms position-difference speed, not 0x606C: the drive's
+# velocity jitters +-0.04 rad/s at rest, and with a 0.02 deadband that switched the help
+# on at standstill and started J3 sliding on its own (arm01, 2026-11-24).
+DEADBAND = 0.05               # rad/s: no Coulomb help below this
+RAMP = 0.05                   # rad/s: smoothstep to full help over this
 DEFAULT_FRICTION_GAIN = 0.6   # when the joint config has no float_friction_gain
 MAX_FRICTION_GAIN = 0.95      # never compensate all of it
-VEL_LIMIT_FRACTION = 0.5      # x max_vel: switch to damping
-RESUME_FRACTION = 0.25        # x max_vel: all below this for RESUME_S -> float again
+# x max_vel (2 rad/s on arm01): over this, float ends with a Mode P stop. Was 0.5 with
+# latched CST damping; on arm01 that damping limit-cycled between the torque clamps at
+# kd 6 and again at kd 3 (2026-11-24), so the over-speed response is now the drive's own
+# position loop.
+VEL_LIMIT_FRACTION = 0.3
+# the CSP->CST switch slips a joint ~0.5 deg in its first ~70 ms (arm01, 2026-11-23):
+# for this long after start only 2x the velocity limit trips
+OVERSPEED_GRACE_S = 0.1
+OVERSPEED_WINDOW_S = 0.02     # speed for the limit: position change over this, not a 0x606C spike
+RESUME_FRACTION = 0.25        # unused since the over-speed stop; kept for FloatConfig callers
 RESUME_S = 0.2
-SAFETY_KD_SCALE = 3.0         # x max(kd, 0.2) (the watchdog damping): safety damping
+# x max(kd, 0.2): latched safety damping. 3x (kd 6 on J1/J2) limit-cycled at ~25 Hz
+# between the torque clamps in CST on arm01 (2026-11-24); 1.5x matches the lock kd,
+# which held steady.
+SAFETY_KD_SCALE = 1.5
 WALL_MARGIN = 10 * DEG        # walls start this far inside the soft limits
 WALL_TORQUE_FRACTION = 0.5    # wall spring reaches this x clamp at the soft limit
-LOCK_KP_SCALE = 5.0           # locked joints: x the joint config gains
-LOCK_KD_SCALE = 2.0
+# locked joints: x the joint config gains. 1x held arm01 steady in CST (2026-11-23 probe)
+# but gives ~2.7 deg to a 5 N push on the tool (J1); 2.5x keeps that under 1.5 deg.
+# Was 5x / 2x, which risked chatter in CST.
+LOCK_KP_SCALE = 2.5
+LOCK_KD_SCALE = 1.5
+# oscillation trip: commanded torque past this x clamp, reversing sign this many
+# times within the window on one joint -> stop floating, straight to a Mode P hold
+OSC_TORQUE_FRACTION = 0.6
+OSC_FLIPS = 4
+OSC_WINDOW_S = 0.3
 LOCK_KI = 5.0                 # 1/s, integrator on the lock target (static error -> 0)
 LOCK_I_MAX = 5 * DEG
 STOP_SPEED = 0.01             # rad/s: "stopped" on exit
-EXIT_DAMP_S = 0.6             # at most this long damping to a stop on exit
+EXIT_STOP_S = 0.2             # Mode P ramp from the exit speed to a stop
 EXIT_HOLD_S = 0.5             # Mode P hold streamed before returning
 
 
@@ -120,6 +142,12 @@ def _per_joint(v, n, name) -> np.ndarray:
     return a.copy()
 
 
+def configured_damping(arm) -> np.ndarray:
+    """Per-joint `float_damping` (Nm s/rad) from the joint config, 0 where unset."""
+    rows = {r.get('name'): r for r in (arm.raw.get('joints') or [])}
+    return np.array([float((rows.get(nme) or {}).get('float_damping') or 0.0) for nme in arm.names])
+
+
 def configured_friction_gains(arm) -> np.ndarray:
     """Per-joint `float_friction_gain` from the joint config (gravity-check
     writes it), DEFAULT_FRICTION_GAIN where unset."""
@@ -155,7 +183,7 @@ class FloatConfig:
     resume_fraction: float = RESUME_FRACTION
 
     @classmethod
-    def from_arm(cls, arm, model, friction_gain=None, damping=0.0, lock=None, payload=None,
+    def from_arm(cls, arm, model, friction_gain=None, damping=None, lock=None, payload=None,
                  walls=True, **kw) -> 'FloatConfig':
         """model: nominal URDF + calibration with the soft limits applied (cli.build_model)."""
         n = arm.n
@@ -167,7 +195,8 @@ class FloatConfig:
         return cls(
             friction_gain=np.clip(gain, 0.0, MAX_FRICTION_GAIN),
             coulomb=np.asarray(getattr(model, 'coulomb', np.zeros(n)), float).copy(),
-            damping=np.maximum(_per_joint(damping, n, 'damping'), 0.0),
+            damping=np.maximum(configured_damping(arm) if damping is None
+                               else _per_joint(damping, n, 'damping'), 0.0),
             lock=np.zeros(n, bool) if lock is None else np.asarray(lock, bool).copy(),
             torque_clamp=clamp,
             max_vel=np.array([j.max_vel_rad_s for j in arm.joints], float),
@@ -197,9 +226,18 @@ class FloatController:
         self.cfg = cfg
         self.lock_q = np.asarray(q0, float).copy()
         self.lock_i = np.zeros(cfg.n)
-        self.damping_on = False
-        self._calm_s = 0.0
+        self.damping_on = False       # never set since the over-speed stop; kept for traces
+        self.overspeed: Optional[int] = None
+        self._t0: Optional[float] = None
+        self._hist: List = []         # (t, q) over OVERSPEED_WINDOW_S
         self.events: List[Dict] = []
+        # Walls start where the joint already is when it starts inside the margin (rest
+        # sits within 10 deg of J2's and the elbow's lower limits): a wall must only resist
+        # going further out, never kick the arm toward the margin edge. A joint that later
+        # clears the margin gets the full wall.
+        q0 = np.asarray(q0, float)
+        self.wall_lo = np.minimum(cfg.lower + cfg.wall_margin, q0)
+        self.wall_hi = np.maximum(cfg.upper - cfg.wall_margin, q0)
 
     def _event(self, t, name, **kw):
         self.events.append({'t': float(t), 'event': name, **kw})
@@ -208,35 +246,36 @@ class FloatController:
         c = self.cfg
         q, qd = np.asarray(s.q, float), np.asarray(s.qd, float)
         free = ~c.lock
-        # safety: velocity limit -> latched damping
-        speed = np.abs(qd) / np.maximum(c.max_vel, 1e-6)
-        if not self.damping_on and np.any(speed[free] > c.vel_limit_fraction):
-            self.damping_on = True
-            self._calm_s = 0.0
+        # safety: velocity limit -> run_float ends with a Mode P stop (no CST damping)
+        self._hist.append((float(s.t), q.copy()))
+        while len(self._hist) > 2 and self._hist[1][0] <= s.t - OVERSPEED_WINDOW_S:
+            self._hist.pop(0)
+        span = self._hist[-1][0] - self._hist[0][0]
+        v = (q - self._hist[0][1]) / span if span >= 0.5 * OVERSPEED_WINDOW_S else np.zeros(c.n)
+        speed = np.abs(v) / np.maximum(c.max_vel, 1e-6)
+        if self._t0 is None:
+            self._t0 = float(s.t)
+        limit = c.vel_limit_fraction * (2.0 if s.t - self._t0 < OVERSPEED_GRACE_S else 1.0)
+        if self.overspeed is None and np.any(speed[free] > limit):
             j = int(np.argmax(np.where(free, speed, 0.0)))
-            self._event(s.t, 'float_damping_on', joint=j, qd=float(qd[j]),
+            self.overspeed = j
+            self._event(s.t, 'float_overspeed', joint=j, qd=float(v[j]),
                         limit=float(c.vel_limit_fraction * c.max_vel[j]))
-        elif self.damping_on:
-            self._calm_s = self._calm_s + dt if np.all(speed[free] < c.resume_fraction) else 0.0
-            if self._calm_s >= RESUME_S:
-                self.damping_on = False
-                self._event(s.t, 'float_damping_off')
 
         q_d = q.copy()
         kp = np.zeros(c.n)
         kd = c.damping.copy()
-        tau_ff = np.zeros(c.n)
-        if self.damping_on:
-            kd = np.maximum(kd, c.safety_kd)
-        else:
-            tau_ff = c.friction_gain * c.coulomb * coulomb_ramp(qd, c.deadband, c.ramp)
+        tau_ff = c.friction_gain * c.coulomb * coulomb_ramp(v, c.deadband, c.ramp)
         if c.walls:
-            lo, hi = c.lower + c.wall_margin, c.upper - c.wall_margin
+            full_lo, full_hi = c.lower + c.wall_margin, c.upper - c.wall_margin
+            self.wall_lo = np.where(q >= full_lo, full_lo, self.wall_lo)
+            self.wall_hi = np.where(q <= full_hi, full_hi, self.wall_hi)
+            lo, hi = self.wall_lo, self.wall_hi
             past = (q < lo) | (q > hi)
             outward = ((q < lo) & (qd < 0)) | ((q > hi) & (qd > 0))
             q_d = np.where(past, np.clip(q, lo, hi), q_d)
             kp = np.where(past, c.wall_kp, kp)
-            kd = np.where(outward, kd + c.wall_kd, kd)
+            kd = np.where(outward, np.maximum(kd, c.wall_kd), kd)
         tau_ff = np.where(free, tau_ff, 0.0)
         # locked joints: stiff PD on the lock pose, plus a slow integrator
         if np.any(c.lock):
@@ -249,9 +288,37 @@ class FloatController:
                        payload=c.payload)
 
 
+class OscillationTrip:
+    """Per joint: commanded torque beyond OSC_TORQUE_FRACTION x clamp that flips sign
+    OSC_FLIPS times within OSC_WINDOW_S -> tripped (index of the joint, else None)."""
+
+    def __init__(self, clamp: np.ndarray):
+        self.limit = OSC_TORQUE_FRACTION * np.asarray(clamp, float)
+        self.sign = np.zeros(len(self.limit))
+        self.flips: List[List[float]] = [[] for _ in self.limit]
+
+    def update(self, t: float, tau_cmd) -> Optional[int]:
+        if tau_cmd is None:
+            return None
+        tau = np.asarray(tau_cmd, float)
+        for j, (x, lim) in enumerate(zip(tau, self.limit)):
+            if abs(x) < lim:
+                continue
+            sg = np.sign(x)
+            if self.sign[j] != 0 and sg != self.sign[j]:
+                f = self.flips[j]
+                f.append(t)
+                while f and t - f[0] > OSC_WINDOW_S:
+                    f.pop(0)
+                if len(f) >= OSC_FLIPS:
+                    return j
+            self.sign[j] = sg
+        return None
+
+
 @dataclass
 class FloatResult:
-    reason: str                               # 'duration', 'interrupt', 'stop'
+    reason: str                               # 'duration', 'interrupt', 'stop', 'overspeed', 'oscillation'
     seconds: float
     q_start: np.ndarray
     q_end: np.ndarray                         # after the exit hold
@@ -264,7 +331,8 @@ class FloatResult:
 
     @property
     def damping_triggered(self) -> bool:
-        return any(e['event'] == 'float_damping_on' for e in self.events)
+        """The velocity limit fired (float ended with a Mode P stop)."""
+        return any(e['event'] == 'float_overspeed' for e in self.events)
 
 
 def _send_hold(client: ArmClient, q, cfg: FloatConfig):
@@ -273,20 +341,21 @@ def _send_hold(client: ArmClient, q, cfg: FloatConfig):
 
 
 def exit_to_hold(client: ArmClient, cfg: FloatConfig, ctrl: FloatController, s: JointState,
-                 hold_s: float = EXIT_HOLD_S) -> JointState:
-    """Damp the floating joints to a stop, then hold the current pose in Mode P."""
+                 hold_s: float = EXIT_HOLD_S, glide: bool = True) -> JointState:
+    """Mode P from the first cycle (CST damping limit-cycles on arm01): the target
+    glides from the exit speed to a stop over EXIT_STOP_S (glide=False: hold where it
+    is, for an oscillating arm whose 0x606C speed means nothing), then holds."""
     dt = client.cmd_dt
-    still = 0.0
-    for _ in range(max(1, int(EXIT_DAMP_S / dt))):
-        cmd = ctrl.command(s, dt)
-        cmd.kd = np.where(cfg.lock, cmd.kd, np.maximum(cmd.kd, cfg.safety_kd))
-        cmd.tau_ff = np.zeros(cfg.n)
-        client.send(cmd)
+    vmax = cfg.vel_limit_fraction * cfg.max_vel
+    v0 = np.clip(np.asarray(s.qd, float), -vmax, vmax) if glide else np.zeros(cfg.n)
+    v0 = np.where(cfg.lock, 0.0, v0)
+    q0 = np.asarray(s.q, float).copy()
+    n_stop = int(round(EXIT_STOP_S / dt)) if glide else 0
+    for k in range(1, n_stop + 1):
+        t = k * dt
+        _send_hold(client, q0 + v0 * (t - t * t / (2 * EXIT_STOP_S)), cfg)
         s = client.step(dt)
-        still = still + dt if np.max(np.abs(s.qd)) < STOP_SPEED else 0.0
-        if still >= 0.05:
-            break
-    q_hold = s.q.copy()
+    q_hold = q0 + v0 * EXIT_STOP_S / 2
     for _ in range(max(1, int(round(hold_s / dt)))):
         _send_hold(client, q_hold, cfg)
         s = client.step(dt)
@@ -310,6 +379,7 @@ def run_float(client: ArmClient, cfg: FloatConfig, duration: Optional[float] = N
     t0 = s.t
     q0 = s.q.copy()
     ctrl = FloatController(cfg, q0)
+    osc = OscillationTrip(cfg.torque_clamp)
     if log is not None:
         log.event('float_start', **cfg.summary())
     n = cfg.n
@@ -352,6 +422,16 @@ def run_float(client: ArmClient, cfg: FloatConfig, duration: Optional[float] = N
             if status is not None and time.monotonic() - wall0 - last_status >= 1.0:
                 last_status = time.monotonic() - wall0
                 status(t, s)
+            if ctrl.overspeed is not None:
+                reason = 'overspeed'
+                break
+            j = osc.update(s.t - t0, s.tau_cmd)
+            if j is not None:
+                reason = 'oscillation'
+                ctrl._event(s.t, 'float_oscillation', joint=j)
+                if log is not None:
+                    log.event('float_oscillation', t_ns=int(s.t * 1e9), joint=j)
+                break
             if stop is not None and stop(s, s.t - t0):
                 reason = 'stop'
                 break
@@ -361,7 +441,7 @@ def run_float(client: ArmClient, cfg: FloatConfig, duration: Optional[float] = N
         if operator is not None and hasattr(client, 'apply_external_torque'):
             client.apply_external_torque(None)
     seconds = s.t - t0
-    s = exit_to_hold(client, cfg, ctrl, s, hold_s)
+    s = exit_to_hold(client, cfg, ctrl, s, hold_s, glide=reason != 'oscillation')
     if log is not None:
         log.event('float_end', reason=reason, seconds=float(seconds), q=s.q.tolist(),
                   max_speed_fraction=vmax.tolist(), max_torque_fraction=tmax.tolist())
@@ -394,7 +474,7 @@ def cli_run(args, arm, model, client, recorder=None) -> int:
     payload = parse_payload(args.payload)
     if payload is None:
         payload = (0.0, 0.0, 0.0, 0.0)      # no --payload: none mounted (clears a sticky one)
-    damping = [float(x) for x in str(args.damping).split(',')] if args.damping is not None else 0.0
+    damping = [float(x) for x in str(args.damping).split(',')] if args.damping is not None else None
     gain = [float(x) for x in str(args.friction_gain).split(',')] if args.friction_gain is not None else None
     cfg = FloatConfig.from_arm(arm, model, friction_gain=gain, damping=damping, lock=lock, payload=payload)
     duration = args.duration
@@ -405,8 +485,9 @@ def cli_run(args, arm, model, client, recorder=None) -> int:
             client.set_payload(Payload('tool0', payload[0], tuple(payload[1:])))
         if duration is None:
             duration = 4.0
-        # the sim operator: 12 N sideways on the tool for 1.5 s, then let go
-        operator = push_profile([0.0, 12.0, 0.0], 0.5, 2.0)
+        # the sim operator: 3 N sideways on the tool for 1.5 s, then let go (12 N ran
+        # past the 0.6 rad/s over-speed stop)
+        operator = push_profile([0.0, 3.0, 0.0], 0.5, 2.0)
     if not np.any(cfg.coulomb > 0):
         print('  note: no friction model in the calibration (run arm friction): no Coulomb help')
     print('float: %s floating, %s locked; friction gain %s; damping %s Nm s/rad; payload %s; '
@@ -428,7 +509,7 @@ def cli_run(args, arm, model, client, recorder=None) -> int:
     print('float: %s after %.1f s; travel (deg) %s; peak speed %.0f%% of max_vel; peak torque %.0f%% of clamp%s'
           % (r.reason, r.seconds, np.round(np.degrees(r.travel), 1).tolist(),
              100 * float(np.max(r.max_speed_fraction)), 100 * float(np.max(r.max_torque_fraction)),
-             '; safety damping %d x' % sum(e['event'] == 'float_damping_on' for e in r.events)
-             if r.damping_triggered else ''))
+             ''.join('; %s on %s' % (e['event'].replace('float_', ''), arm.names[e['joint']])
+                     for e in r.events if e['event'] in ('float_overspeed', 'float_oscillation'))))
     print('  holding in Mode P at %s deg' % np.round(np.degrees(r.q_end), 1).tolist())
     return 0

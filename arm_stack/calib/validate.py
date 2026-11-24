@@ -32,7 +32,7 @@ from ..control.motion import Trace, move_to, stream
 from ..hw import indicator_cube
 from ..hw.client import Command
 from . import mocap_repeat, pivot
-from .common import DEG, StageContext, StageResult, random_poses, safe_home
+from .common import DEG, StageContext, StageResult, clear_of_keep_out, random_poses, safe_home
 from .gravity import RESIDUAL_FRACTION, measure_pose
 
 HOLD_DRIFT = 2 * DEG
@@ -79,8 +79,8 @@ def hold_test(ctx, n_poses, exclude: Sequence[np.ndarray]):
     peak_g = model.peak_gravity_torque()
     peak = np.array([j.peak_torque_nm for j in ctx.arm.joints])
     poses = []
-    for q in random_poses(model, n_poses * 5, rng, margin=12 * DEG, spread=0.8):
-        if all(np.max(np.abs(q - e)) > 5 * DEG for e in exclude):
+    for q in random_poses(model, n_poses * 20, rng, margin=12 * DEG, spread=0.8):
+        if clear_of_keep_out(ctx.arm.keep_out, q) and all(np.max(np.abs(q - e)) > 5 * DEG for e in exclude):
             poses.append(q)
         if len(poses) == n_poses:
             break

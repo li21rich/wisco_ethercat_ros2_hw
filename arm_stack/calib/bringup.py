@@ -14,13 +14,13 @@ import numpy as np
 
 from ..control.motion import hold_and_average, move_to
 from ..hw.client import Command
-from .common import DEG, StageContext, StageResult, safe_home
+from .common import DEG, StageContext, StageResult, clear_of_keep_out, safe_home
 
 TORQUE_CLAMP_FRACTION = 0.10
 
 
-def gravity_test_pose(model, joint, home, rng, tries=400):
-    """A pose near home where `joint` carries clear gravity torque."""
+def gravity_test_pose(model, joint, home, rng, tries=400, zones=()):
+    """A pose near home, clear of the keep-out `zones`, where `joint` carries clear gravity torque."""
     best, best_g = home.copy(), abs(model.gravity(home)[joint])
     for _ in range(tries):
         q = home.copy()
@@ -30,7 +30,7 @@ def gravity_test_pose(model, joint, home, rng, tries=400):
             q[i] = np.clip(home[i] + rng.uniform(-0.25, 0.25) * span, model.lower[i] + 5 * DEG,
                            model.upper[i] - 5 * DEG)
         g = abs(model.gravity(q)[joint])
-        if g > best_g:
+        if g > best_g and clear_of_keep_out(zones, q):
             best, best_g = q, g
     return best, best_g
 
@@ -52,7 +52,7 @@ def run(ctx: StageContext, soak_s: float = None) -> StageResult:
     mismatched = {}
     details = {}
     for j, name in enumerate(arm.names):
-        q_test, g_mag = gravity_test_pose(model, j, home, ctx.rng)
+        q_test, g_mag = gravity_test_pose(model, j, home, ctx.rng, zones=ctx.arm.keep_out)
         g_model = model.gravity(q_test)
         tclamp = np.maximum(clamp, np.abs(g_model) * 1.5 + 0.1 * peak)
         move_to(client, q_test, max_speed=0.2, torque_clamp=tclamp)

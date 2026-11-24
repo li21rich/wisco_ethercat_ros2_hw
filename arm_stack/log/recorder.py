@@ -59,15 +59,16 @@ class Recorder:
 
     def __init__(self, path: str, meta: Dict[str, Any]):
         try:
-            from mcap.writer import Writer
+            from mcap.writer import CompressionType, Writer
         except ImportError as e:  # pragma: no cover
-            raise ImportError('pip install mcap (or apt ros-<distro>-mcap-vendor)') from e
+            raise ImportError('the mcap Python package (PyPI mcap; Ubuntu has no python3-mcap)') from e
         if meta.get('calibration_version') is None:
             raise SessionRejected('meta needs calibration_version (spec: sessions without one are rejected)')
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.path = path
         self._f = open(path, 'wb')
-        self._w = Writer(self._f)
+        # lz4, not mcap's default zstd: python3-lz4 is on the arm PCs, python3-zstandard is not
+        self._w = Writer(self._f, compression=CompressionType.LZ4)
         self._w.start(profile='', library='arm_stack')
         self._ch = {}
         for topic, schema in SCHEMAS.items():

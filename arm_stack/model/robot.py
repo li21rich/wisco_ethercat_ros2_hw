@@ -5,6 +5,10 @@ Calibration results layer on top of the supplied URDF without editing it:
   * kinematic_overlay (mocap-calib): small per-joint origin translations and
     axis-tilt rotations,
   * friction (stage 6): Coulomb + viscous per joint.
+  * joint_springs (stage 5): a torque offset_nm + stiffness_nm_per_rad * q on a
+    joint, from its own angle alone: what the rigid-body model cannot carry, e.g.
+    the cable loop across arm01's J2 (-0.4 Nm near hanging, rising with the angle).
+    Added to gravity(); the RT GravityModel adds it the same way.
 """
 
 from __future__ import annotations
@@ -51,6 +55,8 @@ class ArmModel:
         self.velocity_limit = np.array([self.nominal.velocityLimit[i] for i in self.vidx])
         self.coulomb = np.zeros(len(self.joint_names))
         self.viscous = np.zeros(len(self.joint_names))
+        self.spring_offset = np.zeros(len(self.joint_names))
+        self.spring_k = np.zeros(len(self.joint_names))
         # a copy: calibration layers edit self.model and read the nominal values,
         # so applying a calibration twice must not compound
         self.model = self.nominal.copy()
@@ -81,6 +87,8 @@ class ArmModel:
         other.data = other.model.createData()
         other.coulomb = self.coulomb.copy()
         other.viscous = self.viscous.copy()
+        other.spring_offset = self.spring_offset.copy()
+        other.spring_k = self.spring_k.copy()
         return other
 
     # ------------------------------------------------------------------ calibration layers
@@ -128,7 +136,21 @@ class ArmModel:
                                                      M.translation + np.array(o.get('dxyz', [0, 0, 0])))
         self.data = self.model.createData()
 
+    def apply_springs(self, springs: Optional[Dict[str, Dict]]):
+        """springs: {joint: {'offset_nm', 'stiffness_nm_per_rad'}}; joints left out: none."""
+        self.spring_offset = np.zeros(self.n)
+        self.spring_k = np.zeros(self.n)
+        for i, n in enumerate(self.joint_names):
+            e = (springs or {}).get(n) or {}
+            self.spring_offset[i] = float(e.get('offset_nm') or 0.0)
+            self.spring_k[i] = float(e.get('stiffness_nm_per_rad') or 0.0)
+
+    def springs(self, q: Sequence[float]) -> np.ndarray:
+        return self.spring_offset + self.spring_k * np.asarray(q, float)
+
     def apply_calibration(self, calib: Dict, masses: Optional[Dict] = None):
+        if calib.get('joint_springs'):
+            self.apply_springs(calib['joint_springs'])
         if calib.get('link_inertials') or masses:
             self.apply_link_inertials(calib.get('link_inertials') or {}, masses)
         if calib.get('friction'):
@@ -194,6 +216,10 @@ class ArmModel:
 
     # ------------------------------------------------------------------ dynamics
     def gravity(self, q: Sequence[float]) -> np.ndarray:
+        """Static holding torque: rigid-body gravity plus the joint springs."""
+        return self.rigid_gravity(q) + self.springs(q)
+
+    def rigid_gravity(self, q: Sequence[float]) -> np.ndarray:
         return self._from_v(pin.computeGeneralizedGravity(self.model, self.data, self._q(q)))
 
     def rnea(self, q, qd, qdd) -> np.ndarray:

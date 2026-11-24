@@ -13,6 +13,7 @@ model on it at random poses, and stores inputs and outputs:
   * link_masses_kg (weighed masses, the controller's link_mass_names/values),
   * friction for every joint,
   * kinematic_overlay entries with dxyz + drot and with dxyz only,
+  * joint_springs: offset + stiffness on two joints, offset only on a third,
   * per pose: q, gravity (calibrated and nominal), FK of tool0 and flange.
 
 test/test_gravity_parity.cpp loads the URDF and this calibration into
@@ -69,8 +70,13 @@ def make_calibration(model: ArmModel, rng):
         overlay[n] = {'dxyz': rng.uniform(-0.002, 0.002, 3).tolist(),
                       'drot': rng.uniform(-0.01, 0.01, 3).tolist()}
     overlay['forearm_yaw'] = {'dxyz': rng.uniform(-0.002, 0.002, 3).tolist()}
+    springs = {'shoulder_roll': {'offset_nm': float(rng.uniform(-0.5, 0.5)),
+                                 'stiffness_nm_per_rad': float(rng.uniform(-0.3, 0.3))},
+               'elbow': {'offset_nm': float(rng.uniform(-0.2, 0.2)),
+                         'stiffness_nm_per_rad': float(rng.uniform(-0.2, 0.2))},
+               'wrist_yaw': {'offset_nm': float(rng.uniform(-0.05, 0.05))}}
     cal = {'version': 0, 'link_inertials': inertials, 'friction': friction,
-           'kinematic_overlay': overlay}
+           'kinematic_overlay': overlay, 'joint_springs': springs}
     return cal, masses
 
 
