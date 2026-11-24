@@ -28,6 +28,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(pinocchio REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
@@ -49,7 +50,7 @@ target_include_directories(wisco_ethercat_ros2_hw_arm_controller PUBLIC
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
 ament_target_dependencies(wisco_ethercat_ros2_hw_arm_controller
   controller_interface hardware_interface pluginlib rclcpp rclcpp_lifecycle realtime_tools
-  std_msgs)
+  std_msgs sensor_msgs)
 target_link_libraries(wisco_ethercat_ros2_hw_arm_controller pinocchio::pinocchio yaml-cpp)
 
 pluginlib_export_plugin_description_file(controller_interface safe_command_controller_plugin.xml)
@@ -104,6 +105,7 @@ install(
     scripts/multi_velocity_cmd.py
     scripts/bringup_check.py
     scripts/check_urdf.py
+    scripts/orin_tester.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -147,7 +149,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_arm_controller_mock
     wisco_mock_ethercat wisco_ethercat_ros2_hw_arm_controller wisco_ethercat_ros2_hw_controllers)
   ament_target_dependencies(test_arm_controller_mock
-    controller_interface hardware_interface rclcpp rclcpp_lifecycle std_msgs)
+    controller_interface hardware_interface rclcpp rclcpp_lifecycle std_msgs sensor_msgs)
 
   # C++ GravityModel (the controller's) against the Python ArmModel (sim,
   # calibration): golden file written by tools/make_parity_golden.py.

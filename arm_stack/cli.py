@@ -131,17 +131,22 @@ def cmd_rest(arm, calibration, client):
         client.close()
 
 
+def rest_pose(arm, model):
+    """The hanging rest pose, 3 deg inside the soft limits."""
+    from .calib.common import DEG
+    from .calib.stop_zero import rough_pose
+    margin = np.minimum(3 * DEG, 0.2 * (model.upper - model.lower))
+    return np.clip(rough_pose(arm, 'hanging'), model.lower + margin, model.upper - margin)
+
+
 def go_to_rest(arm, calibration, client) -> int:
     """cmd_rest without closing the client. Ctrl-C during the move stops it; the
     controller then holds where the arm is."""
     from .calib.common import DEG
-    from .calib.stop_zero import rough_pose
     from .control.motion import move_to
     from .hw.client import Command
     try:
-        model = build_model(arm, calibration)
-        margin = np.minimum(3 * DEG, 0.2 * (model.upper - model.lower))
-        home = np.clip(rough_pose(arm, 'hanging'), model.lower + margin, model.upper - margin)
+        home = rest_pose(arm, build_model(arm, calibration))
         q = client.state().q.copy()
         print('Moving to rest at %.2f rad/s:' % REST_SPEED)
         for n, a, b in zip(arm.names, q, home):
@@ -400,8 +405,10 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog='arm', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('stage', choices=[s for s, _ in STAGES] + ['gravity-check', 'float', 'all', 'rig', 'status',
-                                                               'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest', 'goto', 'goto-xyz'])
+                                                               'export', 'commission', 'autocal', 'reference', 'telemetry', 'rest', 'goto', 'goto-xyz', 'wave'])
     p.add_argument('paths', nargs='*', help='export: kind and files; goto: J1..J7 (deg); goto-xyz: X Y Z (m, base frame)')
+    p.add_argument('--swing-s', type=float, default=0.7, help='wave: seconds per side-to-side swing')
+    p.add_argument('--waves', type=int, default=2, help='wave: number of waves')
     p.add_argument('--speed', type=float, default=None, help='goto, goto-xyz: peak joint speed, rad/s (default 0.25)')
     p.add_argument('--manual-shoulders', action='store_true', help='log externally measured J2 and J3 angles alongside telemetry')
     p.add_argument('--log-angles', metavar='CSV', help='telemetry: capture labeled poses from cyclic feedback')
@@ -565,6 +572,13 @@ def main(argv=None) -> int:
         return cmd_rest(arm, calibration, client)
     if args.stage in ('goto', 'goto-xyz'):
         return cmd_goto(args, arm, calibration, client)
+    if args.stage == 'wave':
+        from .control import wave
+        try:
+            home = rest_pose(arm, build_model(arm, calibration))
+            return wave.run(client, home, arm.keep_out, waves=args.waves, swing_s=args.swing_s)
+        finally:
+            client.close()
     recorder = None
     if not args.no_log or args.record is not None:
         from .log.recorder import Recorder, RecordingClient, SessionRejected

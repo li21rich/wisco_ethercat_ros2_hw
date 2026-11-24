@@ -189,6 +189,12 @@ class RosArmClient(ArmClient):
     def goto(self, q_goal, max_speed: float) -> float:
         """Send one goal; the controller runs a min-jerk path to it at 1 kHz and then
         holds it. Returns the path duration (s), computed as the controller does."""
+        return self.goto_path([q_goal], [max_speed])
+
+    def goto_path(self, qs, speeds) -> float:
+        """Send waypoints as one path (see ~/goto in arm_controller.hpp): joints that keep
+        going pass a waypoint without stopping, reversals turn without a dwell. Holds
+        the last one. Returns the path duration (s), computed as the controller does."""
         if not np.all((self.state().status & 0x6f) == 0x27):
             raise RuntimeError('A drive is disabled or faulted; motion commands stopped.')
         deadline = time.monotonic() + 2.0
@@ -196,12 +202,16 @@ class RosArmClient(ArmClient):
             if time.monotonic() > deadline:
                 raise RuntimeError('arm_controller has no ~/goto subscriber; rebuild and restart the launch')
             time.sleep(0.02)
-        q_goal = np.asarray(q_goal, float)
+        qs = [np.asarray(q, float) for q in qs]
         msg = self._msg_type()
-        msg.data = [float(max_speed)] + q_goal.tolist()
-        q_from = self.state().q
+        msg.data = [x for q, v in zip(qs, speeds) for x in [float(v)] + q.tolist()]
+        prev = self.state().q
         self.goto_pub.publish(msg)
-        return max(0.5, 1.875 * float(np.max(np.abs(q_goal - q_from))) / max_speed)
+        duration = 0.0
+        for q, v in zip(qs, speeds):
+            duration += max(0.5, 1.875 * float(np.max(np.abs(q - prev))) / v)
+            prev = q
+        return duration
 
     def step(self, seconds: float = 0.0) -> JointState:
         # wall-clock pacing; the RT loop runs on its own clock

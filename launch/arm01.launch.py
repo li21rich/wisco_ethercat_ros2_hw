@@ -41,7 +41,7 @@ def generate_launch_description():
         'joints_file': os.path.join(share, 'config', 'arms', 'arm01.yaml'),
         'calibration_file': latest_calibration(share),
         'control_mode': '',
-        'update_rate': '250',
+        'update_rate': '250',    # 1 kHz made RMD-X drives randomly stop taking RxPDO data (target ignored while enabled), 2026-11-24
         'joint_state_rate': '50',
         'command_timeout': '0.05',
         'use_mock_hardware': 'false',

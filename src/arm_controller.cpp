@@ -40,6 +40,7 @@ controller_interface::CallbackReturn ArmController::on_init()
     auto_declare<bool>("drive_feedback", false);
     auto_declare<bool>("hold_on_startup", false);
     auto_declare<bool>("hold_on_timeout", false);
+    auto_declare<bool>("torque_compensation", true);
     auto_declare<bool>("gravity_enabled", true);
     auto_declare<bool>("hold_only", false);
     auto_declare<bool>("position_only", false);
@@ -326,7 +327,69 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
       c->received_ns = steady_now_ns();
       command_buffer_.writeFromNonRT(c);
     });
+  torque_compensation_ = node->get_parameter("torque_compensation").as_bool();
+  joint_position_sub_ = node->create_subscription<sensor_msgs::msg::JointState>(
+    "~/joint_position", rclcpp::SystemDefaultsQoS(),
+    [this, n](const sensor_msgs::msg::JointState::SharedPtr msg) {
+      const auto log = get_node()->get_logger();
+      if (hold_only_) {
+        RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+          "Ignoring joint_position: relative reference permits position holding only");
+        return;
+      }
+      auto c = std::make_shared<Command>();
+      auto & law = c->law;
+      if (!from_joint_state(*msg, msg->position, true, "position", law.q) ||
+        !from_joint_state(*msg, msg->velocity, false, "velocity", law.qd) ||
+        !from_joint_state(*msg, msg->effort, false, "effort", law.tau_ff))
+      {
+        return;
+      }
+      law.present = true;
+      law.mode = arm::kModeP;
+      law.gravity_ff = true;
+      law.friction_ff_gain = 1.0;
+      law.kp.assign(n, std::numeric_limits<double>::quiet_NaN());
+      law.kd = law.kp;
+      law.torque_clamp = law.kp;
+      if (position_only_) {std::fill(law.tau_ff.begin(), law.tau_ff.end(), 0.0);}
+      c->q_base = law.q;
+      c->extrapolate = std::any_of(law.qd.begin(), law.qd.end(), [](double v) {return std::isfinite(v);});
+      c->received_ns = steady_now_ns();
+      command_buffer_.writeFromNonRT(c);
+    });
+  joint_torque_sub_ = node->create_subscription<sensor_msgs::msg::JointState>(
+    "~/joint_torque", rclcpp::SystemDefaultsQoS(),
+    [this, n](const sensor_msgs::msg::JointState::SharedPtr msg) {
+      const auto log = get_node()->get_logger();
+      if (hold_only_ || position_only_) {
+        RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+          "Ignoring joint_torque: this calibration only permits position commands");
+        return;
+      }
+      auto c = std::make_shared<Command>();
+      auto & law = c->law;
+      if (!from_joint_state(*msg, msg->effort, true, "effort", law.tau_ff)) {return;}
+      law.present = true;
+      law.mode = arm::kModeT;
+      law.gravity_ff = torque_compensation_;
+      law.friction_ff_gain = 1.0;
+      law.q.assign(n, std::numeric_limits<double>::quiet_NaN());
+      law.qd = law.kp = law.kd = law.torque_clamp = law.q;
+      c->received_ns = steady_now_ns();
+      command_buffer_.writeFromNonRT(c);
+    });
+  joint_state_pub_ = node->create_publisher<sensor_msgs::msg::JointState>(
+    "~/joint_state", rclcpp::SystemDefaultsQoS());
+  rt_joint_state_ = std::make_unique<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
+    joint_state_pub_);
+  rt_joint_state_->msg_.name = joints_;
+  rt_joint_state_->msg_.position.assign(n, 0.0);
+  rt_joint_state_->msg_.velocity.assign(n, 0.0);
+  rt_joint_state_->msg_.effort.assign(n, 0.0);
+
   goto_q0_.assign(n, 0.0);
+  goto_c_.assign(6 * n, 0.0);
   goto_law_ = arm::LawCommand();
   goto_law_.present = true;
   goto_law_.age_s = 0.0;
@@ -345,17 +408,28 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
         RCLCPP_WARN(log, "Ignoring goto: relative reference permits position holding only");
         return;
       }
-      if (d.size() != n + 1 || !std::isfinite(d[0]) || d[0] <= 0.0 ||
-        !std::all_of(d.begin() + 1, d.end(), [](double v) {return std::isfinite(v);}))
-      {
-        RCLCPP_WARN(log, "ignoring goto: need [max_speed > 0, q[%zu]] all finite, got %zu values",
+      const size_t k = d.size() / (n + 1);
+      bool ok = k > 0 && d.size() == k * (n + 1) &&
+        std::all_of(d.begin(), d.end(), [](double v) {return std::isfinite(v);});
+      for (size_t j = 0; ok && j < k; ++j) {ok = d[j * (n + 1)] > 0.0;}
+      if (!ok) {
+        RCLCPP_WARN(log, "ignoring goto: need [max_speed > 0, q[%zu]] x k, all finite, got %zu values",
           n, d.size());
         return;
       }
       auto g = std::make_shared<Goto>();
-      g->max_speed = d[0];
-      for (size_t i = 0; i < n; ++i) {g->max_speed = std::min(g->max_speed, cfg_.max_velocity[i]);}
-      g->q.assign(d.begin() + 1, d.end());
+      double vmax = std::numeric_limits<double>::infinity();
+      for (size_t i = 0; i < n; ++i) {vmax = std::min(vmax, cfg_.max_velocity[i]);}
+      for (size_t j = 0; j < k; ++j) {
+        g->speed.push_back(std::min(d[j * (n + 1)], vmax));
+        g->q.insert(g->q.end(), d.begin() + j * (n + 1) + 1, d.begin() + (j + 1) * (n + 1));
+      }
+      g->T.assign(k, 0.0);
+      for (size_t j = 1; j < k; ++j) {
+        double dist = 0.0;
+        for (size_t i = 0; i < n; ++i) {dist = std::max(dist, std::fabs(g->q[j * n + i] - g->q[(j - 1) * n + i]));}
+        g->T[j] = std::max(0.5, 1.875 * dist / g->speed[j]);
+      }
       g->received_ns = steady_now_ns();
       goto_buffer_.writeFromNonRT(g);
     });
@@ -488,8 +562,104 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
+bool ArmController::from_joint_state(
+  const sensor_msgs::msg::JointState & msg, const std::vector<double> & field,
+  bool required, const char * what, std::vector<double> & out) const
+{
+  const size_t n = joints_.size();
+  const auto log = get_node()->get_logger();
+  out.assign(n, std::numeric_limits<double>::quiet_NaN());
+  if (field.empty()) {
+    if (required) {
+      RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000, "ignoring JointState: no %s", what);
+    }
+    return !required;
+  }
+  if (msg.name.empty()) {
+    if (field.size() != n) {
+      RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+        "ignoring JointState: %zu %s values without names; expected %zu (in 'joints' order)",
+        field.size(), what, n);
+      return false;
+    }
+    out = field;
+  } else {
+    if (field.size() != msg.name.size()) {
+      RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+        "ignoring JointState: %zu names but %zu %s values", msg.name.size(), field.size(), what);
+      return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      const auto it = std::find(msg.name.begin(), msg.name.end(), joints_[i]);
+      if (it == msg.name.end()) {
+        RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+          "ignoring JointState: no %s for joint '%s'", what, joints_[i].c_str());
+        return false;
+      }
+      out[i] = field[static_cast<size_t>(it - msg.name.begin())];
+    }
+  }
+  if (required && !std::all_of(out.begin(), out.end(), [](double v) {return std::isfinite(v);})) {
+    RCLCPP_WARN_THROTTLE(log, *get_node()->get_clock(), 2000,
+      "ignoring JointState: a %s value is not finite", what);
+    return false;
+  }
+  return true;
+}
+
+// Goto waypoint j for joint i; j = -1 is where the path started.
+double ArmController::goto_wp(const Goto & g, long j, size_t i) const
+{
+  return j < 0 ? goto_q0_[i] : g.q[static_cast<size_t>(j) * joints_.size() + i];
+}
+
+// Velocity and acceleration of joint i at waypoint j (the end of segment j). The start
+// and the last waypoint are at rest. A joint still on either side comes to rest; one
+// that keeps going the same way passes at the mean of the two segment speeds (capped); one
+// that reverses stops with the acceleration a smooth reversal has (the mean of the
+// two segments' cubic end accelerations), so it turns without a dwell.
+void ArmController::goto_via(const Goto & g, long j, size_t i, double & v, double & a) const
+{
+  v = a = 0.0;
+  if (j < 0 || static_cast<size_t>(j) + 1 >= g.k()) {return;}
+  const double d1 = goto_wp(g, j, i) - goto_wp(g, j - 1, i);
+  const double d2 = goto_wp(g, j + 1, i) - goto_wp(g, j, i);
+  const double T1 = goto_seg_T(g, j), T2 = goto_seg_T(g, j + 1);
+  if (std::fabs(d1) < 1e-6 || std::fabs(d2) < 1e-6) {return;}
+  if (d1 * d2 > 0.0) {
+    // capped at twice the slower segment's mean speed: more and the quintic on
+    // that side backs up before it moves (overshoots its start)
+    const double m1 = d1 / T1, m2 = d2 / T2;
+    const double cap = 2.0 * std::min(std::fabs(m1), std::fabs(m2));
+    v = std::copysign(std::min(0.5 * std::fabs(m1 + m2), cap), d1);
+  } else {
+    a = 0.5 * (-6.0 * d1 / (T1 * T1) + 6.0 * d2 / (T2 * T2));
+  }
+}
+
+// Quintic for the current segment from its end conditions (all zero: min-jerk).
+void ArmController::goto_plan_segment(const Goto & g)
+{
+  const long j = static_cast<long>(goto_seg_);
+  const double T = goto_seg_T(g, goto_seg_);
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    const double p0 = goto_wp(g, j - 1, i), p1 = goto_wp(g, j, i);
+    double v0, a0, v1, a1;
+    goto_via(g, j - 1, i, v0, a0);
+    goto_via(g, j, i, v1, a1);
+    const double dp = p1 - p0, T2 = T * T, T3 = T2 * T;
+    double * c = &goto_c_[6 * i];
+    c[0] = p0;
+    c[1] = v0;
+    c[2] = 0.5 * a0;
+    c[3] = (20.0 * dp - (8.0 * v1 + 12.0 * v0) * T - (3.0 * a0 - a1) * T2) / (2.0 * T3);
+    c[4] = (-30.0 * dp + (14.0 * v1 + 16.0 * v0) * T + (3.0 * a0 - 2.0 * a1) * T2) / (2.0 * T3 * T);
+    c[5] = (12.0 * dp - 6.0 * (v1 + v0) * T - (a0 - a1) * T2) / (2.0 * T3 * T2);
+  }
+}
+
 controller_interface::return_type ArmController::update(
-  const rclcpp::Time &, const rclcpp::Duration & period)
+  const rclcpp::Time & time, const rclcpp::Duration & period)
 {
   const size_t n = joints_.size();
   const int64_t now = steady_now_ns();   // command age (the watchdog) only
@@ -519,6 +689,13 @@ controller_interface::return_type ArmController::update(
   const std::shared_ptr<Command> cmd = *command_buffer_.readFromRT();
   if (cmd) {
     cmd->law.age_s = (now - cmd->received_ns) * 1e-9;
+    if (cmd->extrapolate) {
+      const double h = std::clamp(cmd->law.age_s, 0.0, cfg_.watchdog_s);
+      for (size_t i = 0; i < n; ++i) {
+        const double v = cmd->law.qd[i];
+        cmd->law.q[i] = cmd->q_base[i] + (std::isfinite(v) ? v * h : 0.0);
+      }
+    }
     // the payload is sticky: kept after the command goes stale (the watchdog
     // fallback still carries it) and by later commands without the block
     if (cmd->has_payload && payload_ok_ &&
@@ -564,17 +741,22 @@ controller_interface::return_type ArmController::update(
           if (holding_) {goto_q0_[i] = q_hold_[i];}
           dist = std::max(dist, std::fabs(go->q[i] - goto_q0_[i]));
         }
-        goto_T_ = std::max(0.5, 1.875 * dist / go->max_speed);
+        goto_T0_ = std::max(0.5, 1.875 * dist / go->speed[0]);
+        goto_seg_ = 0;
+        goto_plan_segment(*go);
       } else {
         goto_t_ += dt;
+        while (goto_t_ >= goto_seg_T(*go, goto_seg_) && goto_seg_ + 1 < go->k()) {
+          goto_t_ -= goto_seg_T(*go, goto_seg_);
+          ++goto_seg_;
+          goto_plan_segment(*go);
+        }
       }
-      const double s = std::clamp(goto_t_ / goto_T_, 0.0, 1.0);
-      const double p = s * s * s * (10.0 - 15.0 * s + 6.0 * s * s);
-      const double v = 30.0 * s * s * (1.0 - s) * (1.0 - s) / goto_T_;
+      const double t = std::min(goto_t_, goto_seg_T(*go, goto_seg_));
       for (size_t i = 0; i < n; ++i) {
-        const double span = go->q[i] - goto_q0_[i];
-        goto_law_.q[i] = goto_q0_[i] + p * span;
-        goto_law_.qd[i] = v * span;
+        const double * c = &goto_c_[6 * i];
+        goto_law_.q[i] = c[0] + t * (c[1] + t * (c[2] + t * (c[3] + t * (c[4] + t * c[5]))));
+        goto_law_.qd[i] = c[1] + t * (2 * c[2] + t * (3 * c[3] + t * (4 * c[4] + t * 5 * c[5])));
       }
       law = &goto_law_;
     }
@@ -646,7 +828,16 @@ controller_interface::return_type ArmController::update(
       target = arm::rate_limit(q_target_prev_[i], goal, cfg_.max_velocity[i] * dt);
       const double alpha = dt / (dt + velocity_ff_tau_s_.load(std::memory_order_relaxed));
       vff_[i] += alpha * ((target - q_target_prev_[i]) / dt - vff_[i]);
-      vff = std::clamp(velocity_ff_gain_.load(std::memory_order_relaxed) * vff_[i], -cfg_.max_velocity[i], cfg_.max_velocity[i]);
+      // A goto knows its exact path velocity: use it (no differentiation, no filter
+      // lag), as long as the target sent IS that path (not clamped by a limit or
+      // keep-out, not easing in, not rate-limited). Streamed commands keep the filter.
+      double v_ref = vff_[i];
+      if (law == &goto_law_ && out_.q_target[i] == goto_law_.q[i] && since_ease_[i] >= blend_s_ &&
+        target == goal)
+      {
+        v_ref = goto_law_.qd[i];
+      }
+      vff = std::clamp(velocity_ff_gain_.load(std::memory_order_relaxed) * v_ref, -cfg_.max_velocity[i], cfg_.max_velocity[i]);
       q_target_prev_[i] = target;
     } else {
       vff_[i] = 0.0;
@@ -726,6 +917,16 @@ controller_interface::return_type ArmController::update(
         std::numeric_limits<double>::quiet_NaN();
     }
     rt_state_->unlockAndPublish();
+  }
+  if (rt_joint_state_ && rt_joint_state_->trylock()) {
+    auto & m = rt_joint_state_->msg_;
+    m.header.stamp = time;
+    for (size_t i = 0; i < n; ++i) {
+      m.position[i] = q_[i];
+      m.velocity[i] = qd_[i];
+      m.effort[i] = tau_meas_[i];
+    }
+    rt_joint_state_->unlockAndPublish();
   }
   return controller_interface::return_type::OK;
 }

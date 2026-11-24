@@ -26,6 +26,34 @@
 //                    limits, keep-out, rate limit). At the end it keeps holding q. A
 //                    ~/command received after the goto takes over; a drive leaving
 //                    OPERATION_ENABLED cancels it. Smooth whatever the network does.
+//                    Several waypoints in one message, [speed_1, q_1[n], speed_2,
+//                    q_2[n], ...], run as one path (quintic segments, each timed as a
+//                    min-jerk move at its speed): a joint that keeps going the same
+//                    way passes a waypoint without stopping, one that reverses stops
+//                    there with continuous acceleration (no dwell), and one that
+//                    stops moving on either side comes to rest. One waypoint is the
+//                    plain min-jerk move.
+//
+// Orin-facing API (sensor_msgs/JointState; joints matched by name, or in the
+// controller's `joints` order when name is empty). Both stream: send at
+// >= 50 Hz (100+ is better), since a stream that stops for watchdog_s (50 ms)
+// makes the arm hold where it is (hold_on_timeout). Both go through the same law
+// as ~/command (soft limits, keep-out, rate and torque limits), and the newest of
+// ~/command, ~/joint_position, ~/joint_torque and ~/goto wins.
+//   ~/joint_position (in)  CSP. position [rad] for every joint, required.
+//                    velocity [rad/s] optional: velocity feedforward, and the
+//                    target is extrapolated along it between messages (up to
+//                    watchdog_s), so a 100 Hz stream is smooth at 250 Hz.
+//                    effort [Nm] optional: extra torque feedforward. Gravity
+//                    and friction feedforward are always added by this side.
+//   ~/joint_torque (in)    CST. effort [Nm] for every joint, required: the torque
+//                    each drive applies. With torque_compensation (parameter,
+//                    default true) this side adds gravity and friction
+//                    compensation, so all zeros floats the arm; false sends the
+//                    effort as is (the Orin then compensates gravity itself).
+//   ~/joint_state (out)    every cycle: position [rad], velocity [rad/s], effort
+//                    (measured torque, Nm), stamped with the controller time.
+//
 //   ~/state (out)    [t (s, steady), mode, fallback, limit_hit, clamped,
 //                     q[n], qd[n], tau_measured[n], tau_out[n], q_target[n]]
 //                    every cycle, through a realtime publisher (try-lock; the
@@ -69,6 +97,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
 #include "realtime_tools/realtime_publisher.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "wisco_ethercat_ros2_hw/arm_law.hpp"
 
@@ -109,12 +138,17 @@ private:
     int64_t received_ns = 0;
     bool has_payload = false;          // the optional payload block was sent
     double payload[kPayloadBlock] = {0.0, 0.0, 0.0, 0.0};
+    // ~/joint_position: law.q = q_base + qd * age (capped at watchdog_s), set in RT
+    bool extrapolate = false;
+    std::vector<double> q_base;
   };
   struct Goto
   {
-    double max_speed = 0.0;
-    std::vector<double> q;
+    std::vector<double> speed;   // per waypoint, rad/s peak
+    std::vector<double> q;       // waypoints, k x n
+    std::vector<double> T;       // segment durations; T[0] (from the start) is set in RT
     int64_t received_ns = 0;
+    size_t k() const {return speed.size();}
   };
   using Ref = std::reference_wrapper<hardware_interface::LoanedCommandInterface>;
   using StateRef = std::reference_wrapper<hardware_interface::LoanedStateInterface>;
@@ -132,10 +166,26 @@ private:
   // goto in progress (RT thread only)
   int64_t goto_ns_ = 0;              // received_ns of the goto being run (0: none)
   int64_t goto_cancelled_ns_ = 0;    // a goto cancelled by a drive dropping out
-  double goto_t_ = 0.0, goto_T_ = 0.0;
+  double goto_t_ = 0.0, goto_T0_ = 0.0;   // time in the current segment, first segment's duration
+  size_t goto_seg_ = 0;
   std::vector<double> goto_q0_;
+  std::vector<double> goto_c_;         // current segment's quintic, n x 6
+  double goto_seg_T(const Goto & g, size_t j) const {return j == 0 ? goto_T0_ : g.T[j];}
+  double goto_wp(const Goto & g, long j, size_t i) const;
+  void goto_via(const Goto & g, long j, size_t i, double & v, double & a) const;
+  void goto_plan_segment(const Goto & g);
   arm::LawCommand goto_law_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr subscription_;
+  // Orin-facing API (see the top of this file)
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_position_sub_, joint_torque_sub_;
+  std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>> joint_state_pub_;
+  std::unique_ptr<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>> rt_joint_state_;
+  bool torque_compensation_ = true;
+  // Per controller joint, the value of `field` for it in msg (by name, or in order
+  // when msg has no names). Empty field: all NaN, false if required. Non-RT.
+  bool from_joint_state(
+    const sensor_msgs::msg::JointState & msg, const std::vector<double> & field,
+    bool required, const char * what, std::vector<double> & out) const;
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> state_pub_;
   std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Float64MultiArray>> rt_state_;
 
