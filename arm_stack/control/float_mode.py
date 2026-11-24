@@ -54,7 +54,7 @@ MAX_FRICTION_GAIN = 0.95      # never compensate all of it
 # latched CST damping; on arm01 that damping limit-cycled between the torque clamps at
 # kd 6 and again at kd 3 (2026-11-24), so the over-speed response is now the drive's own
 # position loop.
-VEL_LIMIT_FRACTION = 0.3
+VEL_LIMIT_FRACTION = 0.5     # 1.0 rad/s: 0.6 tripped on a normal hand-guiding push (2026-11-24)
 # the CSP->CST switch slips a joint ~0.5 deg in its first ~70 ms (arm01, 2026-11-23):
 # for this long after start only 2x the velocity limit trips
 OVERSPEED_GRACE_S = 0.1
